@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CyberShield Pyme - Gestión de Alertas</title>
+    <!-- Bootstrap 5 CSS & Icons -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --sidebar-width: 250px;
+            --primary: #0f172a;
+            --sidebar-hover: #1e293b;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --bg-light: #f8fafc;
+        }
+        body { font-family: 'Inter', sans-serif; background-color: var(--bg-light); overflow-x: hidden; }
+        .sidebar {
+            position: fixed; top: 0; left: 0; width: var(--sidebar-width); height: 100vh;
+            background-color: var(--primary); color: white; padding: 1.25rem 1rem; z-index: 1000;
+        }
+        .sidebar .nav-link {
+            color: #94a3b8; border-radius: 8px; margin-bottom: 6px; padding: 10px 14px;
+            display: flex; align-items: center; gap: 10px; font-weight: 500; text-decoration: none; transition: all 0.2s;
+        }
+        .sidebar .nav-link:hover, .sidebar .nav-link.active { background-color: var(--sidebar-hover); color: #f8fafc; }
+        .content { margin-left: var(--sidebar-width); padding: 24px; }
+        .topbar {
+            background: white; border-bottom: 1px solid #e2e8f0; padding: 12px 24px;
+            display: flex; justify-content: space-between; align-items: center;
+            position: sticky; top: 0; z-index: 999; margin: -24px -24px 24px -24px;
+        }
+        .status-badge {
+            display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px;
+            border-radius: 9999px; font-weight: 700; font-size: 0.85rem; letter-spacing: 0.05em;
+            color: var(--danger); background: #fee2e2; border: 1px solid #fca5a5;
+        }
+        .kpi-card {
+            background: white; border-radius: 12px; padding: 20px;
+            border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.04); height: 100%;
+        }
+        .kpi-value { font-size: 1.85rem; font-weight: 700; margin: 4px 0; }
+        .kpi-label { color: #64748b; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; }
+        .table-container {
+            background: white; border-radius: 12px; padding: 20px;
+            border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        }
+        @media (max-width: 768px) {
+            .sidebar { width: 100%; height: auto; position: relative; }
+            .content { margin-left: 0; }
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Sidebar -->
+    <div class="sidebar d-flex flex-column">
+        <div class="d-flex align-items-center mb-4 px-2">
+            <i class="bi bi-shield-check fs-3 text-info me-2"></i>
+            <h5 class="mb-0 fw-bold">CyberShield</h5>
+        </div>
+        <ul class="nav flex-column">
+            <li class="nav-item"><a class="nav-link" href="/frontend/"><i class="bi bi-speedometer2"></i> Monitor en Vivo</a></li>
+            <li class="nav-item"><a class="nav-link" href="/frontend/analisis.html"><i class="bi bi-graph-up"></i> Análisis Forense</a></li>
+            <li class="nav-item"><a class="nav-link" href="/frontend/rendimiento.html"><i class="bi bi-cpu"></i> Rendimiento</a></li>
+            <li class="nav-item"><a class="nav-link active" href="/frontend/alertas.html"><i class="bi bi-exclamation-triangle"></i> Alertas</a></li>
+            <li class="nav-item"><a class="nav-link" href="/docs" target="_blank"><i class="bi bi-code-slash"></i> API Swagger</a></li>
+        </ul>
+        <div class="mt-auto p-2 bg-dark bg-opacity-25 rounded small text-secondary">
+            <div><i class="bi bi-shield-lock"></i> NIDS: Estado Pasivo</div>
+            <div><i class="bi bi-database"></i> SQLite / PostgreSQL</div>
+        </div>
+    </div>
+
+    <!-- Contenido Principal -->
+    <div class="content">
+        <!-- Topbar -->
+        <div class="topbar shadow-sm">
+            <div class="d-flex align-items-center gap-3">
+                <span class="status-badge" id="topAlertBadge"><i class="bi bi-bell-fill"></i> MÓDULO DE ALERTAS NIDS</span>
+                <span class="text-muted small" id="currentTime"></span>
+            </div>
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-outline-danger" onclick="simulateAlert()"><i class="bi bi-play-circle"></i> Inyectar Ataque Test</button>
+            </div>
+        </div>
+
+        <!-- KPIs de Alertas -->
+        <div class="row g-3 mb-4">
+            <div class="col-md-6 col-xl-3">
+                <div class="kpi-card">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="kpi-label">Alertas Totales</div>
+                            <div class="kpi-value text-dark" id="kpiTotalAlerts">0</div>
+                        </div>
+                        <i class="bi bi-bell fs-3 text-primary"></i>
+                    </div>
+                    <div class="small text-muted">Ataques DDoS en BD</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl-3">
+                <div class="kpi-card">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="kpi-label">Críticas (Confianza ≥ 95%)</div>
+                            <div class="kpi-value text-danger" id="kpiCritical">0</div>
+                        </div>
+                        <i class="bi bi-exclamation-octagon fs-3 text-danger"></i>
+                    </div>
+                    <div class="small text-muted">Riesgo Inminente</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl-3">
+                <div class="kpi-card">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="kpi-label">Altas (85% - 94%)</div>
+                            <div class="kpi-value text-warning" id="kpiHigh">0</div>
+                        </div>
+                        <i class="bi bi-exclamation-triangle fs-3 text-warning"></i>
+                    </div>
+                    <div class="small text-muted">Patrón Anómalo Fuerte</div>
+                </div>
+            </div>
+            <div class="col-md-6 col-xl-3">
+                <div class="kpi-card">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="kpi-label">Medias (< 85%)</div>
+                            <div class="kpi-value text-info" id="kpiMedium">0</div>
+                        </div>
+                        <i class="bi bi-info-circle fs-3 text-info"></i>
+                    </div>
+                    <div class="small text-muted">Tráfico Sospechoso</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Filtros Dinámicos -->
+        <div class="card shadow-sm border-0 mb-4">
+            <div class="card-body">
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                        <label class="form-label small fw-semibold">Severidad</label>
+                        <select class="form-select form-select-sm" id="filterSeverity">
+                            <option value="all">Todas</option>
+                            <option value="Crítica">Crítica (≥ 95%)</option>
+                            <option value="Alta">Alta (85% - 94%)</option>
+                            <option value="Media">Media (< 85%)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small fw-semibold">Protocolo</label>
+                        <select class="form-select form-select-sm" id="filterProtocol">
+                            <option value="all">Todos</option>
+                            <option value="UDP">UDP</option>
+                            <option value="TCP">TCP</option>
+                            <option value="ICMP">ICMP</option>
+                        </select>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small fw-semibold">Buscar IP Origen</label>
+                        <input type="text" class="form-control form-control-sm" id="searchIp" placeholder="Ej: 192.168...">
+                    </div>
+                    <div class="col-md-2">
+                        <button class="btn btn-primary btn-sm w-100" id="applyFiltersBtn">
+                            <i class="bi bi-funnel"></i> Filtrar
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabla de Alertas -->
+        <div class="table-container">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h6 class="mb-0 fw-bold text-secondary"><i class="bi bi-shield-slash"></i> Registro Detallado de Incidentes</h6>
+                <a href="/api/export/csv" class="btn btn-sm btn-outline-secondary"><i class="bi bi-download"></i> Exportar CSV</a>
+            </div>
+            <div class="table-responsive">
+                <table class="table table-hover align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Fecha y Hora</th>
+                            <th>IP Atacante</th>
+                            <th>IP Destino</th>
+                            <th>Protocolo</th>
+                            <th>Severidad</th>
+                            <th>Confianza Conv1D</th>
+                            <th>Acción Mitigación</th>
+                        </tr>
+                    </thead>
+                    <tbody id="alertsTableBody">
+                        <!-- Llenado dinámico -->
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Paginación -->
+            <div class="d-flex justify-content-between align-items-center mt-3">
+                <span class="text-muted small" id="paginationInfo">Mostrando 0 alertas</span>
+                <div class="btn-group btn-group-sm">
+                    <button class="btn btn-outline-secondary" id="prevPageBtn" disabled><i class="bi bi-chevron-left"></i> Anterior</button>
+                    <button class="btn btn-outline-secondary" id="nextPageBtn" disabled>Siguiente <i class="bi bi-chevron-right"></i></button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal de Acción / Mitigación -->
+    <div class="modal fade" id="actionModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold"><i class="bi bi-shield-x text-danger"></i> Mitigación de Amenaza</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body" id="modalContent">
+                    <!-- Contenido dinámico -->
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+                    <button type="button" class="btn btn-danger btn-sm" onclick="executeBlockRule()">Aplicar Regla Firewall (iptables)</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/frontend/js/alertas.js"></script>
+</body>
+</html>

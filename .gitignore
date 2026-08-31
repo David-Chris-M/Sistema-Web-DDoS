@@ -1,0 +1,50 @@
+# Entornos virtuales
+venv/
+env/
+.env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dll
+*.pdb
+
+# Bases de datos
+*.db
+*.sqlite
+*.sqlite3
+traffic_nids.db
+ddos_records.db
+
+# Modelos grandes (si pesan > 100 MB, mejor Git LFS)
+ml/models/*.keras
+ml/models/*.h5
+ml/models/*.pkl
+ml/models/*.pb
+
+# Datasets (no subas archivos pesados)
+ml/dataset/*.csv
+ml/dataset/*.pcap
+ml/dataset/*.pcap_ISCX.csv
+
+# Configuraciones de IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Archivos de compilación / distribución
+dist/
+build/
+*.egg-info/
