@@ -83,23 +83,44 @@ document.getElementById('applyFiltersBtn').addEventListener('click', () => loadA
 document.getElementById('prevPageBtn').addEventListener('click', () => { if (currentPage > 1) loadAlerts(currentPage - 1); });
 document.getElementById('nextPageBtn').addEventListener('click', () => loadAlerts(currentPage + 1));
 
-// Mitigación y Reglas de Firewall
+let selectedSeverity = 'Crítica';
+let selectedConfidence = 99.0;
+
 function openActionModal(ip, severity, conf) {
     selectedIpToBlock = ip || '203.0.113.50';
+    selectedSeverity = severity || 'Crítica';
+    selectedConfidence = conf || 99.0;
     document.getElementById('modalContent').innerHTML = `
-        <p>Se ha detectado una anomalía clasificada como <strong>${severity}</strong> con un nivel de confianza del <strong>${conf}%</strong>.</p>
+        <p>Se ha detectado una anomalía clasificada como <strong>${selectedSeverity}</strong> con un nivel de confianza del <strong>${selectedConfidence}%</strong>.</p>
         <div class="alert alert-warning small">
             <strong>IP Sospechosa:</strong> <code>${selectedIpToBlock}</code><br>
-            <strong>Acción Propuesta:</strong> Agregar regla de bloqueo de tráfico al firewall perimetral.
+            <strong>Acción Defensiva:</strong> Registrar IP en la lista de bloqueo del NIDS y generar regla perimetral.
         </div>
-        <p class="small text-muted mb-0">Comando sugerido: <code>iptables -A INPUT -s ${selectedIpToBlock} -j DROP</code></p>
+        <p class="small text-muted mb-0">Comando perimetral: <code>iptables -A INPUT -s ${selectedIpToBlock} -j DROP</code></p>
     `;
     actionModal.show();
 }
 
-function executeBlockRule() {
-    alert(`Regla de Firewall aplicada con éxito: Se ha generado el bloqueo para la IP ${selectedIpToBlock}`);
-    actionModal.hide();
+async function executeBlockRule() {
+    try {
+        const res = await fetch('/api/mitigation/block', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                ip: selectedIpToBlock,
+                reason: 'Ataque DDoS clasificado por Conv1D',
+                severity: selectedSeverity,
+                confidence: selectedConfidence
+            })
+        });
+        const data = await res.json();
+        alert(`Regla Defensiva Aplicada: ${data.message || 'IP bloqueada en sistema de mitigación'}`);
+    } catch (e) {
+        console.error('Error aplicando bloqueo:', e);
+        alert(`Error al registrar bloqueo de la IP ${selectedIpToBlock}`);
+    } finally {
+        actionModal.hide();
+    }
 }
 
 // Simulación de Alerta de prueba

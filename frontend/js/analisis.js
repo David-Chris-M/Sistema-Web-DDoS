@@ -130,6 +130,59 @@ function changePage(delta) {
     loadFlowTable();
 }
 
+async function uploadCsvLogs() {
+    const fileInput = document.getElementById('csvFileInput');
+    const resultDiv = document.getElementById('importResult');
+    const btn = document.getElementById('btnUploadCsv');
+
+    if (!fileInput.files || fileInput.files.length === 0) {
+        resultDiv.className = 'alert alert-warning small';
+        resultDiv.innerHTML = '<i class="bi bi-exclamation-circle me-1"></i> Por favor selecciona un archivo CSV.';
+        return;
+    }
+
+    const file = fileInput.files[0];
+    const formData = new FormData();
+    formData.append('file', file);
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Evaluando con Conv1D...';
+    resultDiv.className = 'alert alert-info small';
+    resultDiv.innerHTML = '<i class="bi bi-hourglass-split me-1"></i> Procesando vectores y aplicando anonimización Ley 29733...';
+
+    try {
+        const res = await fetch('/api/import/csv', {
+            method: 'POST',
+            body: formData
+        });
+
+        const data = await res.json();
+        if (res.ok) {
+            resultDiv.className = 'alert alert-success small';
+            resultDiv.innerHTML = `
+                <strong><i class="bi bi-check-circle-fill me-1"></i> Validación Pasiva Exitosa:</strong><br>
+                • <strong>Archivo:</strong> ${data.filename}<br>
+                • <strong>Flujos evaluados:</strong> ${data.processed_flows.toLocaleString()}<br>
+                • <strong>Tráfico Benigno:</strong> <span class="text-success fw-bold">${data.benign_flows}</span><br>
+                • <strong>Ataques DDoS Detectados:</strong> <span class="text-danger fw-bold">${data.ddos_detected}</span><br>
+                • <strong>Anonimización Ley 29733:</strong> Activa (IPs enmascaradas)<br>
+                • <strong>Tiempo de Inferencia:</strong> ${data.eval_time_ms} ms
+            `;
+            await loadAnalyticsData();
+        } else {
+            resultDiv.className = 'alert alert-danger small';
+            resultDiv.innerHTML = `<strong>Error:</strong> ${data.detail || 'Fallo al procesar el archivo CSV'}`;
+        }
+    } catch (err) {
+        console.error('Error al subir CSV:', err);
+        resultDiv.className = 'alert alert-danger small';
+        resultDiv.innerHTML = '<strong>Error de conexión:</strong> No se pudo conectar con el servidor API.';
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="bi bi-cpu"></i> Evaluar con Conv1D';
+    }
+}
+
 // Reloj
 setInterval(() => {
     document.getElementById('currentTime').textContent = new Date().toLocaleTimeString('es-ES', {

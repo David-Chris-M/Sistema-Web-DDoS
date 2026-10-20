@@ -48,3 +48,14 @@ desktop.ini
 dist/
 build/
 *.egg-info/
+
+
+# Abre tu .gitignore y verifica que tenga estas líneas:
+ml/dataset/
+*.csv
+*.joblib
+*.keras
+*.h5
+.env
+traffic_nids.db
+__pycache__/
