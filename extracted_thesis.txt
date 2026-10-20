@@ -1,0 +1,266 @@
+Universidad tecnológica del Perú – Campus San Juan de Lurigancho
+Ingeniería de Software
+Proyecto de Investigación
+Sistema web con redes neuronales convolucionales para la detección temprana de ataques de denegación de servicio distribuido de ciberseguridad en Pymes de Lima
+Integrantes
+Maquera Atencio, David Chris (U21317982)
+Docente
+Dr. Soria Quijaite Juan Jesús (Orcid: https://orcid.org/0000-0002-4415-8622)
+Lima, Perú
+Ciclo
+2026-2
+ÍNDICE
+1INTRODUCCIÓN3
+2PROBLEMA DE INVESTIGACIÓN4
+3OBJETIVOS6
+3.1OBJETIVO GENERAL6
+3.2OBJETIVOS ESPECÍFICOS7
+3.3HIPÓTESIS7
+3.3.1HIPÓTESIS GENERAL7
+3.3.2HIPÓTESIS ESPECÍFICAS7
+4FUNDAMENTACIÓN (ESTADO DEL ARTE)8
+5DISEÑO METODOLÓGICO DE LA INVESTIGACIÓN12
+5.1Metodología de la investigación12
+5.2Metodología Marco12
+5.2.1Diagrama AS-IS12
+5.2.2Diagrama TO-BE13
+6BIBLIOGRAFÍA13
+ANEXO 1 - MATRIZ DE CONSISTENCIA18
+ANEXO 2 - MATRIZ OPERACIONAL19
+INTRODUCCIÓN
+El presente proyecto de investigación surge debido al rápido crecimiento de las empresas (Pymes) en un contexto de acelerada transformación digital, donde las infraestructuras de red se han convertido en un área que puede ayudar a la empresa pero también puede ponerse en contra si no se implementa las medidas necesarias de seguridad, donde su uso es vital para garantizar las operaciones de negocio en la era moderna, pero también las expone de manera constante a ciberamenazas altamente destructivas y costosas de mitigar [1] . Entre estas amenazas destacan los ataques de denegación de servicio distribuido (DDoS), diseñados para sobrecargar los servicios mediante el envío masivo de solicitudes, logrando forzar la caída de la red corporativa y comprometiendo los ingresos de estabilidad económica [2] .
+En el entorno de seguridad informática, existe evidencia científica que demuestra los sistemas de detección de intrusiones tradicionales (IDS) basados en reglas estáticas y firmas, han quedado obsoletos ante las amenazas modernas, cuyo objetivo es simular patrones de tráfico normal para evadir la seguridad de la red, están diseñados para esquivar de manera imperceptible los perímetros de seguridad al simular idénticamente patrones reales de la red [3], [4] . Para superar estos desafíos, la inteligencia artificial, y en particular el aprendizaje profundo (Deep Learning), ha demostrado que el uso de redes neuronales convolucionales (CNN) permite alcanzar tasas de precisión superiores al 98.5% [5] . Sin embargo, existen vacíos relacionados con la implementación práctica de estos modelos en entornos reales de Pymes, debido tanto al limitado conocimiento técnico disponible de las organizaciones como a la elevada complejidad computacional (CPU/RAM/GPU) que exigen en tiempo real [6]  .
+Por ello, esta investigación resulta relevante, ya que permitiría cerrar lo teórico y lo practico mediante la implementación de un sistema web de detección temprana basado en una red neuronal convolucional unidimensional (Conv1D)[7] . A diferencia de las arquitecturas convolucionales más complejas, la Conv1D consume significativamente menos recursos de hardware al procesar vectores numéricos planos (métricas de trafico de red), lo que facilita la extracción de patrones del tráfico de red con menor latencia y una nula demanda de uso de GPUs de alta gama [8]  .
+Para plasmar esta propuesta, este proyecto de investigación tiene como objetivo principal desarrollar, implementar y evaluar un sistema web basado en redes neuronales convolucionales unidimensionales (Conv1D) para la detección temprana de ataques de denegación de servicio distribuido (DDoS) en pequeñas y medianas empresas (Pymes), midiendo su desempeño en términos de precisión (accuracy), sensibilidad (recall), tiempo de detección (latencia) y tasa de falsos positivos (FPR), y demostrando su viabilidad técnica en un entorno real sin requerir hardware de alta gama [9], [10] . 
+No obstante, el estudio presenta limitaciones éticas y técnicas en el área de ciberseguridad como simular ataques DDoS en un entorno real comprometería la infraestructura de red de la Pyme [11] . Por esta razón, el modelo CNN se entrenará bajo ataques simulados en un entorno controlado en una maquina empleando un dataset publico estandarizado CICIDS2017, y se aplicarán validaciones pasivas, donde el sistema solicitará la exportación autorizada del historial de logs de tráfico en formato CSV (anonimizando datos sensibles) para verificar su funcionamiento sin poner en riesgo el funcionamiento de la empresa [12] .
+Finalmente, este trabajo de investigación se organiza formalmente en siete capítulos: en el Capítulo I se aborda la problemática y los objetivos de la investigación; en el Capítulo II se expone la fundamentación teórica e histórica (estado del arte); en el Capítulo III se detalla el diseño metodológico de la ingeniería propuesta; en los Capítulos IV y V se presenta el desarrollo de la solución de software (FastAPI y Dashboard) junto con las pruebas del modelo neuronal; y en los Capítulos VI y VII se exponen el cronograma, presupuesto y la bibliografía científica empleada de acuerdo con la norma IEEE.
+PROBLEMA DE INVESTIGACIÓN
+En esta época moderna, las empresas pequeñas y medianas (Pymes) no cuentan con una protección elevada en su red, presentando un problema masivo debido a su vulnerabilidad y logrando la mira de atacantes cibernéticos que presentan un peligro destructivo.  Entre ellos, los ataques de denegación de servicio distribuido (DDoS) son los más usados frente a este tipo de escenarios, puesto que este ataque tiene como objetivo atacar el tráfico de red ilegitimo a un servidor o algún recurso especifico de la red. Este problema de rendimiento genera pérdidas de rendimiento del servidor y provocando caídas que en algunos casos se presenta un colapso total del sistema, denegando el acceso a los usuarios legítimos [13] .
+En América Latina, la era de digitalización en el negocio fue un boom enorme, migraciones a servidores locales o en algunos casos sitos web para gestionar las ventas o comunicaciones de sus clientes. Sin embargo, en su mayoría de los recientes emprendedores en este mundo de negocio no cuenta con un firewall moderno ni licencias de seguridad informática, debido al alto impacto financiero que esto presenta, por lo que prefieren gestionar sus ventas en router domésticos convencionales sin ninguna medida de seguridad [14] . 
+A nivel nacional, las investigaciones científicas y la evidencia empírica demuestran que, en el entorno de los ataques volumétricos dirigidos a infraestructuras corporativas, la inundación mediante el protocolo de datagramas de usuario (UDP Flood) es el vector más crítico, siendo el objeto de estudio de 18 artículos de la literatura especializada, seguido en frecuencia por las inundaciones de paquetes TCP SYN explota el saludo de tres vías (el inicio de una conexión orientada a conexión) analizadas en otras 11 investigaciones [15], [16]  . Estos vectores son altamente destructivos debido a que operan sobre protocolos no orientados a conexión, lo que facilita que los atacantes falsifiquen las direcciones IP de origen (IP spoofing) y saturen los firewalls tradicionales en volúmenes masivos o flujos constantes de tráfico, permitiendo el ingreso forzado a la red sin que los mecanismos convencionales puedan identificar eficientemente si los paquetes son maliciosos o legítimos[17] .
+La realidad operativa de la Pyme, los personales de TI o el personal encargado de la seguridad informática suelen tender diversas tareas a lo largo del día , por la necesidad de mantener el correcto funcionamiento del negocio, algunos optan por medidas un poco más prácticas en reiniciar router o realizar bloqueo manuales de IP. A diferencia de loa empresas pequeñas, el nivel de seguridad no puede ser gestionada por el costo elevado, no disponen de analistas de seguridad y solo dependen del poco conocimiento que tiene visualmente, generando errores constantes y generando pérdidas económicas ante un ataque de baja tasa (slow-rate) [18], [19] . Además, al intentar implementar las redes neuronales profundas tradicionales como Long Short-Term Memory (LSTM) para mejorar la automatización, este modelo demanda un alto costo computacional (RAM, GPU, CPU) que no puede ser gestionada, esto se debe a que la estructura empleade es secuencial de las celdas Long Short-Term Memory (LSTM), exigiendo que el almacenamiento sea continuo en los diferentes estados de la memoria RAM generando un requerimiento acelerado grafico(GPUs) para lograr impedir que se forma un cuello de botella en un servidor convencional de gama baja , evitando el uso de arquitecturas pesadas y de un cálculo muy tedioso en escenarios pesados con restricciones de hardware [20], [21] .
+Por esta razón, se plantea una solución que sea accesible para pequeñas y medianas empresas y no dependan de una super computadora de gama alta. Desarrollar un sistema web que combine una red neuronal convolucional unidimensional (Conv1D) en el backend (para procesar flujos de red como vectores numéricos planos), una API rápida en FastAPI y un dashboard interactivo de monitoreo permitirá que los pequeños negocios revisen la seguridad de su red en tiempo real, protegiendo su infraestructura y reduciendo las pérdidas por ataques de denegación de servicio[22] . 
+Ante este contexto se plantea la siguiente pregunta general: ¿En qué medida el desarrollo, implementación y evaluación de un sistema web basado en redes neuronales convolucionales unidimensionales (Conv1D) permite detectar de manera temprana ataques de denegación de servicio distribuido (DDoS) en Pymes, en términos de precisión (accuracy), sensibilidad (recall), tiempo de detección (latencia) y tasa de falsos positivos (FPR)?
+Asimismo, se formulan las siguientes interrogantes específicas que delimitan técnicamente el alcance del proyecto.
+PE1: ¿De qué manera el balanceo de clases mediante SMOTE y la normalización de las métricas de tráfico del dataset CICIDS2017 influyen en la tasa de falsos positivos (FPR) y en la precisión del modelo convolucional para la detección de ataques DDoS?
+PE2: ¿Cómo influye la configuración de la arquitectura de la red neuronal convolucional unidimensional (Conv1D) en el rendimiento de clasificación (precisión y sensibilidad) y en la latencia de inferencia para ataques de saturación volumétrica, utilizando el dataset CICIDS2017?
+PE3: ¿En qué medida la integración del modelo Conv1D con el backend FastAPI y el dashboard interactivo influye en el tiempo transcurrido desde la recepción del flujo de red hasta la emisión de la alerta temprana, sin alterar la tasa de falsos positivos (FPR) del sistema de detección?
+PE4: ¿Cuál es el consumo de CPU y memoria RAM del sistema web basado en Conv1D durante la detección de ataques DDoS, y en qué medida dicho consumo permite su ejecución en hardware convencional de una Pyme durante la validación con tráfico simulado y logs autorizados?
+OBJETIVOS 
+OBJETIVO GENERAL
+OG: Desarrollar e implementar un sistema web basado en Conv1D para la detección temprana de ataques DDoS en Pymes, midiendo su desempeño en términos de precisión (accuracy), sensibilidad (recall), tiempo de detección (latencia) y tasa de falsos positivos (FPR).
+OBJETIVOS ESPECÍFICOS 
+OE1: Determinar la influencia del balanceo de clases (SMOTE) y la normalización de métricas de tráfico del dataset CICIDS2017 en la tasa de falsos positivos (FPR) y en la precisión del modelo convolucional
+OE2: Evaluar la influencia de la configuración de la arquitectura Conv1D en la precisión, sensibilidad y latencia de inferencia para ataques de saturación volumétrica utilizando el dataset CICIDS2017.
+OE3: Determinar la influencia de la implementación del backend en FastAPI y del dashboard interactivo en el tiempo de detección de ataques y en la tasa de falsos positivos (FPR) del sistema de alerta temprana.
+OE4: Medir el consumo de CPU y memoria RAM del sistema web basado en Conv1D y analizar su relación con la precisión, sensibilidad y tasa de falsos positivos durante la validación pasiva con logs de la Pyme.
+HIPÓTESIS 
+HIPÓTESIS GENERAL
+Si se implementa el sistema web basado en Conv1D, entonces se logra una detección temprana eficaz de ataques DDoS en Pymes, con alta precisión y sensibilidad, baja latencia y reducida tasa de falsos positivos.
+HIPÓTESIS ESPECÍFICAS
+HE1: El balanceo mediante SMOTE y la normalización reducen la tasa de falsos positivos a menos del 5% y mejoran la precisión del modelo convolucional a más del 90%.
+HE2: Una arquitectura Conv1D optimizada logra una precisión y sensibilidad superiores al 85% y una latencia de inferencia menor a 100 ms para ataques de saturación volumétrica.
+HE3: La integración del backend en FastAPI y el dashboard interactivo reducen el tiempo de detección de ataques y no incrementan significativamente la tasa de falsos positivos (FPR) del sistema.
+HE4 :El consumo de CPU y memoria RAM se mantiene dentro de los rangos operativos de hardware de bajo costo (sin GPU de alta gama) y no afecta negativamente las métricas de precisión, sensibilidad y FPR del sistema
+FUNDAMENTACIÓN (ESTADO DEL ARTE) 
+La elaboración del estado del arte es la representación de una rigorosa revisión crítica y cuantitativa del estado de las investigaciones del conocimiento del presente año (2021-2026). En este apartado estará estructurado por 10 antecedentes científicos enfocados estrictamente en la detección de ataques de denegación de servicio distribuido (DDoS) en infraestructuras de red unidimensionales (Conv1D) en donde su procesamiento esta elabora con SMOTE y enfocado en la optimización del backend en la web . 
+En las investigaciones actuales, Yungaicela-Naula et al. (2023) [23]   en su investigación científica planteo en diseñar como objetivo mitigar los ataques DDoS de baja tasa(slow-rate) mediante el uso de algoritmo de aprendizaje a través de la captura continua de las métricas en la capa de transporte y diagnosticar el comportamiento anómalo de estos ataques mediante agentes inteligentes. Los resultados cuantitativos que obtuvo esta investigación alcanzaron una precisión de clasificación (Accuracy) superior al 98.0%, en donde el proceso de mitigación se redujo en un tiempo total de a menos de 9.39 segundos. Atreves de este proceso de resultados obtenidos, los investigadores concluyeron que el uso de estas reglas estáticas y el uso de filtros manuales de tasa, trae como consecuencia una alta tasas de falsas alarmas, generando un bloqueo accidental de trafico a usuarios legítimos antes intrusiones lentas. Este estudio tiene como relación en la presente investigación por cuanta importancia demuestra que las Pymes requieren se un sistema de detección que procese flujos en tiempo real. 
+Por otra parte, Aslam et al (2024) [24] , en su investigación propusieron una arquitectura de detección e identificación de ataques de denegación de servicios (DDoS) en donde está integrado en la aplicación ONOS Flood Defender (OFD) utilizando un enfoque de aprendizaje ensamblado y usando métodos de selección de características. En donde el propósito de su estudio fue identificar los atributos de la red en un subconjunto optimo que maximice la precisión de clasificación y que a la vez minimice el tiempo de prueba a través del uso de cuatro datasets públicos (CIC-DoS 2017, CIC-DDoS 2019, CIC-IDS 2018 e InSDN). Donde los resultados obtenidos en pruebas experimentales revelaron que el clasificados XGBoost , logro obtener el resultado de solo 10.6 ms y un 99.1% en InSDN con 11.61 ms, esto logro mitigar un ataque de rastreo en 3.2 segundos. Los autores llegaron a una conclusión que reducir el espacio de 84 a 10 atributos es clave para reducir drásticamente la carga sobre el controlador, puesto que estos atributos mantienen una alta capacidad discriminatoria. Este estudio tiene como relación en la presente investigación la gran importancia de tener un procesamiento de selección de métricas del tráfico de red para lograr la detección rápida y temprana de ataques DDoS antes de saturar y afectar los servidores.
+Por otra parte, Kundu et al. (2023)  [25] diseño un modelo combinado de aprendizajes profundos basado en redes neuronales convolucionales unidimensionales (CNN 1D) con marco SHAP para la detección de ataques, detección e interpretación de ataques de red con el propósito de resolver el problema de falta de transparencia en los modelos mediante la extracción de 199 características a nivel de capas de transporte. Además, en los experimentos realizados en un entorno real de trafico de red y un sintético generado mediante un sistema llamado IXIA BreakingPoint, demostró que la red de neuronales convolucionales unidimensionales (CNN 1D) supero a otros modelos como Random Forest y MLP con un margen de diferencia de un 15% en totas las métricas de evaluación, logrando obtener una puntuación elevada de F1 a nivel global en entornos complejos desbalanceados. En pocas palabras, los autores llegaron a una conclusión que al implementar estas arquitecturas convolucionales en una dimensión son altamente efectivas para interceptar y capturar patrones temporales en áreas locales mediante el uso de datos vectoriales plantos sin perder interpretabilidad, respaldando que el uso de redes convolucionales unidimensionales presenta una alta superioridad técnica para procesar vectores números con alta exactitud. Este estudio tiene como relación en la presente investigación del uso de las redes convolucionales unidimensionales (Conv1D) para procesar vectores numéricos de red con alta exactitud.
+Por otro lado, Nuiaa et al. (2022)  [26] logro desarrollar un modelo proactivo con umbrales adaptivos y una selección de características (PFS) mediante el uso de algoritmos metaheurísticos para la detección temprana de ataques de denegación de servicio por reflexión (DRDoS) encabezado por tener un protocolo de DNS. Con el objetivo principal fue diagnosticar vulnerabilidades de respuesta en servidores de red , para reducir la dimensionalidad de las métricas del tráfico del dataset estandarizado CICDDoS2019. En consecuencia, se mostraron resultados del modelo PFS-PSO-KNN logro alcanzar una precisión (Accuracy) del 91.4% , un margen de sensibilidad de (Recall) del 86.22% y una baja drástica tasa de alarmas falsas de (FPR) a 3.35% ,logrando obtener un descenso de atributos necesarios de 88 a 19 en características críticas. Los investigadores concluyeron al entrenar estos clasificadores sobre las variables optimizadas y posteriormente filtrar el tráfico de entrada se obtiene el colapso de memoria del servidor objetivo. Este estudio tiene como relación en la presente investigación sobre el cuanto aporta tener una evidencia empírica de métricas de red de optimización para reducir los falsos positivos de ataques volumétricos. 
+Bajo el estudio realizado por Berbiche y El Alami (2024) [27] , sobre la detección a la detección robusta de ataques DDoS parte de los sistemas de detección de intrusiones, propusieron una rigorosa metodología integral que ayuda a fortalecer la detección de ataques DDoS en sistemas IDS mediante la selección de atributos basados en matrices de correlación, además de una serie de combinación con técnicas de sobre muestreo sintético sobre el dataset CICIDS2018. Además, se obtuvo como propósito de este estudio mitigar el sesgo hacia las clases mayoritarias sobre el trafico benigno y aumentar la capacidad de detección de clasificaciones en vectores de ataques raros como LOIC-HTTP y LOIC-UDP (que sirven para saturar servidores). Como resultado de esto, se logro obtener una serie de evaluaciones cuantitativas, bajo la combinación ADASYN+SMOTE con el algoritmo XGBoost se obtuvo el rendimiento mejor optimizado, mejor precisión y un F1-Score cercanos al 99.8%, reduciendo la tasa de faltos positivos. Los investigadores concluyeron que el balanceo sintético ofrece datos indispensables para que sean clasificados y no se ignoren bajo los patrones anómalos, demostrando que este estudio justifica la aplicación de la técnica SMOTE en el procesamiento de datos del modelo Conv1D. Este estudio se relaciona directamente con la presente investigación por cuanto justifica la aplicación de la técnica SMOTE en el preprocesamiento de datos para garantizar la sensibilidad del modelo Conv1D.
+Por otro lado, los antecedentes de esta investigación como las redes convolucionales 1D (Conv1D) y los sistemas web ligeros. El autor Al-Dulaimi y Türkben et al (2025) [28]  , menciona que desarrollo un marco hibrido en la fusión  de una red neuronal Conv1D y Árbol(Tree-CNN) en donde se elaboró la extracción de características anómalas de la red. Donde se buscó recolectar los resultados las dependencias simétricas y los datos temporales en datos vectoriales en una dimensión, con la finalidad de no consumir altos recursos y complejidad computacional. Se evaluó bajo un escenario de tres datasets de referencia, en donde se obtuvo una cifra alta de Accuracy del 96.02% en UNSW-NB15, 99.99% en CIC-IDS 2017 y un 99.96% en CIC-IDS 2018; logrando superar por muchos a otras arquitecturas hibridas conocidas en el mercado. Los autores concluyeron el procesamiento de Conv1D en capas es de gran impacto en las maquinas computacionales, ofreciendo una estabilidad en su funcionamiento y a subes un mejor modelo frente a otros modelos. Este estudio tiene en relación directa en la presente investigación en cuanto al rendimiento de la capacidad de las redes convolucionales (1D) pueda procesar vectores planos de trafico de red con una gran precisión que, en algunas ocasiones, puede ser perfecta la precisión. 
+Además, AlSaleh et al (2024) [29] , diseño una arquitectura que combina redes neuronales convolucionales (BaysCNN y BaysFusCNN avanzado) para reducir componentes principales sobre el uso del dataset CICDDoS2019, con el objetivo de realizar 13 tipos de ataques DDoS multiclase para garantizar la escalabilidad y ver su capacidad de respuesta real. Los resultados mostraron que el modelo BaysFusCNN dio una precisión promedio de (Accuracy) con 99.79% a través de los 13 tipos de ataques, demostrando que su capacidad en estos escenarios es alta con un severo desbalance de datos como LDAP y UDP-Lag. Los resultados obtenidos por los investigadores mostraron que a través de la implementación de capas especiales convolucionales proporciona una robustez superior en la toma de decisiones para realizar decisiones preventivas activas. Este estudio se relaciona directamente con la presente investigación sobre el entorno de entrenamiento convolucionales de cuan eficacia sobre atributos de tráficos reducidos para entornos de máquinas con bajos recursos.
+Por otra parte, Gohari et al. (2024)  [30] menciona en su investigación que propusieron un sistema de detección de intrusiones livianos bajo el nombre de CTMBIDS, en donde se diseñaron específicamente para mitigar el consumo excesivo de memoria RAM bajo una compleja elaboración y costo que este consumo pueda presentar dentro del algoritmo convolucional sobre dataset de tráfico de red generados en entorno SDN y KDDCup99. Los resultados obtenidos de estas pruebas mostraron que la variante convolucional logro llegar a una tasa de precisión similar o en algunos casos superior a modelos Deep Learnin convolucionales, logrando superar un 98% de Accuracy. Los autores concluyeron que bajo estos resultados la memoria del sistema se mantuvo estable de consumo de memoria RAM, reduciendo del consumo y que gracias a este factor es determinante para la viabilidad de un IDS en entorno de equipos con recursos limitados. Este estudio se relaciona directamente con la presente investigación por cuanto justifica la importancia de la necesidad de desplegar estos sistemas de bajo recursos en servidores de las Pymes para evitar colapsos de la RAM.
+Así mismo , Mehmood et al (2022) [10]  , menciona que implementaron diversos mecanismos para la detección y mitigación en tiempo real bajo un clasificador de vectores de soporte(SVM) optimizado con un sistema de prevención de intrusiones SNORT, con el objetivo de la investigación de lograr identificar que ruta de ataques para plantear contramedidas sin la intervención humana en las etapas iniciales de la infección, logrando separar el tráfico malicioso con el tráfico legitimo mientras se aíslan, el resultado obtuvo una precisión del 97% que supero drásticamente a sistema simples de SNORT con un 55.2%. Los autores llegaron a la conclusión que sin la intervención humana el proceso de recuperación es crítica para prevenir pérdidas operativas en la infraestructura. Este estudio se relaciona directamente con la presente investigación por cuanto respalda la integración del motor de IA con una interfaz web (FastAPI y Dashboard) para la emisión instantánea de alertas de seguridad.
+Por su parte , Madoune et al (2025) [31] desarrollo un marco analítico que combina la reducción de dimensiones con aprendizaje de ensamble para la clasificación en tiempo real de ataques DDoS volumétricos (UDP Flood, TCP SYN Flood e ICMP). El estudio concluyo que la eficiencia del procesamiento sobre bajo el uso del dataset de mas de 103 mil registros de traficos de red con 20 característica numéricas procesadas, dio como rendimiento en las pruebas que el modelo ensamble alcanzo una precisión máxima de 99.93% con una predicción del 0.187 segundo por flujo. Los investigadores concluyeron que la combinación de bajo la combinación de estas dos etapas logro permitir una latencia inferior a 200 milisegundos, convirtiendo este esquema para un despliegue de alta velocidad.  Este estudio se relaciona directamente con la presente investigación por cuanto demuestra que la optimización vectorial en milisegundos es técnicamente viable para la detección temprana en tiempo real.
+DISEÑO METODOLÓGICO DE LA INVESTIGACIÓN
+Metodología de la investigación 
+Metodología Marco
+Diagrama AS-IS
+Diagrama TO-BE
+BIBLIOGRAFÍA
+[1]S. Venkatraman, S. Kanthimathi, K. S. Jayasankar, T. P. Jiljith, and R. Jashwanth, “A Novel Self-Attention-Enabled Weighted Ensemble-Based Convolutional Neural Network Framework for Distributed Denial of Service Attack Classification,” IEEE Access, vol. 12, pp. 151515–151531, 2024, doi: 10.1109/ACCESS.2024.3478764.
+[2]C. Shieh, T. T. Nguyen, and M. Horng, “Detection of Unknown DDoS Attack Using Convolutional Neural Networks Featuring Geometrical Metric,” Mathematics, vol. 11, no. 9, 2023, doi: 10.3390/math11092145.
+[3]N. M. Yungaicela-Naula, C. Vargas-Rosales, J. A. Pérez-Díaz, and D. F. Carrera, “A flexible SDN-based framework for slow-rate DDoS attack mitigation by using deep reinforcement learning,” Journal of Network and Computer Applications, vol. 205, Sep. 2022, doi: 10.1016/j.jnca.2022.103444.
+[4]S. Dwivedi, M. Vardhan, and S. Tripathi, “Defense against distributed DoS attack detection by using intelligent evolutionary algorithm,” International Journal of Computers and Applications, vol. 44, no. 3, pp. 219–229, 2022, doi: 10.1080/1206212X.2020.1720951.
+[5]T. Yuvaraja, W. G. R. S. Jeyaseelan, S. R. Ashokkumar, and M. Premkumar, “Detecting and Mitigating Low-Rate DoS and DDoS Attacks: Multimodal Fusion of Time-Frequency Analysis and Deep Learning model,” Tehnicki Vjesnik, vol. 31, no. 2, pp. 495–501, Feb. 2024, doi: 10.17559/TV-20230613000728.
+[6]D. Akgun, S. Hizal, and U. Cavusoglu, “A new DDoS attacks intrusion detection model based on deep learning for cybersecurity,” Comput. Secur., vol. 118, Jul. 2022, doi: 10.1016/j.cose.2022.102748.
+[7]J. Shaikh, T. A. Syed, S. A. Shah, S. Jan, Q. U. Ain, and P. K. Singh, “Advancing DDoS attack detection with hybrid deep learning: integrating convolutional neural networks, PCA, and vision transformers,” International Journal on Smart Sensing and Intelligent Systems, vol. 17, no. 1, Apr. 2024, doi: 10.2478/ijssis-2024-0040.
+[8]Svj. Rani et al., “Date of publication xxxx 00, 0000, date of current version xxxx 00, 0000. A Novel Deep Hierarchical Machine Learning Approach for Identification of Known and Unknown Multiple Security Attacks in a D2D Communications Network”, doi: 10.1109/ACCESS.2017.DOI.
+[9]S. Z. E. Omer, F. Hashim, A. Sali, and F. A. Ahmad, “Binary classification of Low-Rate DoS attacks using Long Short-Term Memory Feed-Forward (LSTM-FF) Intrusion Detection System (IDS),” Engineering Science and Technology, an International Journal, vol. 66, Jun. 2025, doi: 10.1016/j.jestch.2025.102049.
+[10]R. Abubakar et al., “An Effective Mechanism to Mitigate Real-Time DDoS Attack,” IEEE Access, vol. 8, pp. 126215–126227, 2020, doi: 10.1109/ACCESS.2020.2995820.
+[11]A. A. Najar and S. Manohar Naik, “Cyber-Secure SDN: A CNN-Based Approach for Efficient Detection and Mitigation of DDoS attacks,” Comput. Secur., vol. 139, Apr. 2024, doi: 10.1016/j.cose.2024.103716.
+[12]K. Harshdeep, K. Sumalatha, and R. Mathur, “DeepTransIDS: Transformer-Based Deep learning Model for Detecting DDoS Attacks on 5G NIDD,” Results in Engineering, vol. 26, Jun. 2025, doi: 10.1016/j.rineng.2025.104826.
+[13]Y. Sanjalawe and T. Althobaiti, “DDoS Attack Detection in Cloud Computing Based on Ensemble Feature Selection and Deep Learning,” Computers, Materials and Continua, vol. 75, no. 2, pp. 3571–3588, 2023, doi: 10.32604/cmc.2023.037386.
+[14]S. Sambangi and L. Gondi, “Cloud Attacks Detection System for Cloud Load Balancing,” IJCSNS International Journal of Computer Science and Network Security, vol. 22, no. 5, doi: 10.22937/IJCSNS.2022.22.5.100.
+[15]J. H. Corrêa, P. M. Ciarelli, M. R. N. Ribeiro, and R. S. Villaça, “ML-Based DDoS Detection and Identification Using Native Cloud Telemetry Macroscopic Monitoring,” Journal of Network and Systems Management, vol. 29, no. 2, Apr. 2021, doi: 10.1007/s10922-020-09578-1.
+[16]A. Hussain, E. Marin Tordera, X. Masip-Bruin, and H. C. Leligou, “Rule-Based With Machine Learning IDS for DDoS Attack Detection in Cyber-Physical Production Systems (CPPS),” IEEE Access, vol. 12, pp. 114894–114911, 2024, doi: 10.1109/ACCESS.2024.3445261.
+[17]A. Hijazi, N. Alhafez, and I. Al-Khayat, “An adaptive distributed intrusion detection system in local network: Hybrid classification methods,” Journal of Intelligent Systems and Internet of Things, vol. 12, no. 1, pp. 129–143, 2024, doi: 10.54216/JISIoT.120110.
+[18]A. Das, “Network Intrusion Detection System based on Generative Adversarial Network for Attack Detection.” [Online]. Available: www.ijacsa.thesai.org
+[19]Y. Sugianela and T. Ahmad, “PORTMAP DDOS ATTACK DETECTION USING FEATURE RANK AND MACHINE LEARNING ALGORITHMS,” ICIC Express Letters, Part B: Applications, vol. 13, no. 4, pp. 347–354, Apr. 2022, doi: 10.24507/icicelb.13.04.347.
+[20]R. Swami, M. Dave, and V. Ranga, “Detection and Analysis of TCP-SYN DDoS Attack in Software-Defined Networking,” Wirel. Pers. Commun., vol. 118, no. 4, pp. 2295–2317, Jun. 2021, doi: 10.1007/s11277-021-08127-6.
+[21]M. Sinha, P. Bera, M. Satpathy, K. S. Sahoo, and J. J. P. C. Rodrigues, “DDoSBlocker: Enhancing SDN security with time-based address mapping and AI-driven approach,” Computer Networks, vol. 259, Mar. 2025, doi: 10.1016/j.comnet.2025.111078.
+[22]P. H. Chitte and S. S. Chaudhari, “An Improved Deep Neuro-Fuzzy and Bi-Directional Gated Recurrent Unit Model for Distributed Denial of Service Attack Detection and Mitigation,” Decision Analytics Journal, vol. 16, Sep. 2025, doi: 10.1016/j.dajour.2025.100608.
+[23]N. M. Yungaicela-Naula, C. Vargas-Rosales, J. A. P. Díaz, E. Jacob, and C. Martinez-Cagnazzo, “Physical Assessment of an SDN-Based Security Framework for DDoS Attack Mitigation: Introducing the SDN-SlowRate-DDoS Dataset,” IEEE Access, vol. 11, pp. 46820–46831, 2023, doi: 10.1109/ACCESS.2023.3274577.
+[24]N. Aslam, S. S. Srivastava, and M. M. Gore, “ONOS DDoS Defender: A Comparative Analysis of Existing DDoS Attack Datasets using Ensemble Approach,” Wirel. Pers. Commun., vol. 133, no. 3, pp. 1805–1827, 2023, doi: 10.1007/s11277-023-10848-9.
+[25]P. P. Kundu, T. Truong-Huu, L. Chen, L. Zhou, and S. Teo, “Detection and Classification of Botnet Traffic using Deep Learning with Model Explanation,” IEEE Trans. Dependable Secure Comput., pp. 1–15, 2022, doi: 10.1109/TDSC.2022.3183361.
+[26]R. R. N. Al Ogaili, S. Manickam, A. H. Alsaeedi, and E. S. Alomari, “Enhancing the Performance of Detect DRDoS DNS Attacks Based on the Machine Learning and Proactive Feature Selection (PFS) Model,” IAENG Int. J. Comput. Sci., vol. 49, no. 2, 2022.
+[27]N. Berbiche and J. El Alami, “For Robust DDoS Attack Detection by IDS: Smart Feature Selection and Data Imbalance Management Strategies,” Ingenierie des Systemes d’Information, vol. 29, no. 4, pp. 1227–1259, 2024, doi: 10.18280/isi.290401.
+[28]R. T. A. Al-Dulaimi and A. K. Türkben, “A Hybrid Tree Convolutional Neural Network with Leader-Guided Spiral Optimization for Detecting Symmetric Patterns in Network Anomalies,” Symmetry (Basel)., vol. 17, no. 3, Mar. 2025, doi: 10.3390/sym17030421.
+[29]I. AlSaleh, A. Al-Samawi, and L. Nissirat, “Novel Machine Learning Approach for DDoS Cloud Detection: Bayesian-Based CNN and Data Fusion Enhancements,” Sensors, vol. 24, no. 5, Mar. 2024, doi: 10.3390/s24051418.
+[30]R. J. Gohari, L. Aliahmadipour, and M. K. Rafsanjani, “CTMBIDS: Convolutional Tsetlin Machine Based Intrusion Detection System for DDoS attacks in an SDN environment,” Sep. 2024, doi: 10.1007/s00521-025-10976-2.
+[31]S. A. Madoune et al., “A novel approach for real-time DDoS detection in SDN using dimensionality reduction and ensemble learning,” Journal of Information Security and Applications, vol. 94, Nov. 2025, doi: 10.1016/j.jisa.2025.104195.
+[32]I. ;Bengio, Y. ; C. A. Goodfellow, Deep Learning. Cambridge, Massachusetts: The MIT Press, 2016.
+[33]W. ; B. L. Stallings, Computer Security: Principles and Practice, Global Edition 2. Pearson Education, 2018.
+ 
+ANEXO 1 - MATRIZ DE CONSISTENCIA
+Tema de Investigación
+Sistema web con redes neuronales convolucionales para la detección temprana de ataques de denegación de servicio distribuido de ciberseguridad en Pymes de Lima
+Problema General
+Objetivos
+Hipótesis
+Variables
+Dimensiones
+Indicadores
+Metodología
+Principal
+¿En qué medida el desarrollo, implementación y evaluación de un sistema web basado en redes neuronales convolucionales unidimensionales (Conv1D) permite detectar de manera temprana ataques de denegación de servicio distribuido (DDoS) en Pymes, en términos de precisión (accuracy), sensibilidad (recall), tiempo de detección (latencia) y tasa de falsos positivos (FPR)? 
+Problemas Secundarios 
+¿De qué manera el balanceo de clases mediante SMOTE y la normalización de las métricas de tráfico del dataset CICIDS2017 influyen en la tasa de falsos positivos (FPR) y en la precisión del modelo convolucional para la detección de ataques DDoS?
+¿Cómo influye la configuración de la arquitectura de la red neuronal convolucional unidimensional (Conv1D) en el rendimiento de clasificación (precisión y sensibilidad) y en la latencia de inferencia para ataques de saturación volumétrica, utilizando el dataset CICIDS2017?
+ ¿De qué manera la implementación de un backend en FastAPI y de un dashboard interactivo influyen en el tiempo de detección de ataques y en la tasa de falsos positivos (FPR) del sistema de alerta temprana?
+¿Cuál es el consumo de CPU y memoria RAM del sistema web basado en Conv1D durante la detección de ataques DDoS, y cómo se relaciona con su precisión, sensibilidad y tasa de falsos positivos al ser validado pasivamente con el historial de logs de la Pyme?
+ 
+ 
+ 
+Objetivo General 
+Desarrollar e implementar un sistema web basado en Conv1D para la detección temprana de ataques DDoS en Pymes, midiendo su desempeño en términos de precisión (accuracy), sensibilidad (recall), tiempo de detección (latencia) y tasa de falsos positivos (FPR). 
+ 
+Objetivos Específicos 
+ 
+Determinar la influencia del balanceo de clases (SMOTE) y la normalización de métricas de tráfico del dataset CICIDS2017 en la tasa de falsos positivos (FPR) y en la precisión del modelo convolucional
+Evaluar la influencia de la configuración de la arquitectura Conv1D en la precisión, sensibilidad y latencia de inferencia para ataques de saturación volumétrica utilizando el dataset CICIDS2017.
+Determinar la influencia de la implementación del backend en FastAPI y del dashboard interactivo en el tiempo de detección de ataques y en la tasa de falsos positivos (FPR) del sistema de alerta temprana.
+Medir el consumo de CPU y memoria RAM del sistema web basado en Conv1D y analizar su relación con la precisión, sensibilidad y tasa de falsos positivos durante la validación pasiva con logs de la Pyme
+Hipótesis General
+Si se implementa el sistema web basado en Conv1D, entonces se logra una detección temprana eficaz de ataques DDoS en Pymes, con alta precisión y sensibilidad, baja latencia y reducida tasa de falsos positivos.
+ 
+Hipótesis Específicos
+El balanceo mediante SMOTE y la normalización reducen la tasa de falsos positivos a menos del 5% y mejoran la precisión del modelo convolucional a más del 90%.
+Una arquitectura Conv1D optimizada logra una precisión y sensibilidad superiores al 85% y una latencia de inferencia menor a 100 ms para ataques de saturación volumétrica.
+ La integración del backend en FastAPI y el dashboard interactivo reducen el tiempo de detección de ataques y no incrementan significativamente la tasa de falsos positivos (FPR) del sistema.
+El consumo de CPU y memoria RAM se mantiene dentro de los rangos operativos de hardware de bajo costo (sin GPU de alta gama) y no afecta negativamente las métricas de precisión, sensibilidad y FPR del sistema.
+Variable X = Variable Independiente:
+Implementación de un sistema web
+Preprocesamiento y Entrenamiento
+Normalización  (Min-Max), Tecnica de balanceo (SMOTE), número de épocas, batch size y tiempo de entrenamiento
+Tipo de investigación
+Aplicada
+Diseño
+Experimental
+Enfoque
+Cuantitativo
+Alcance
+Explicativo y evaluativo
+Correlacional, depende de los objetivos
+Población
+Tráfico de red de Pymes / Dataset público CICIDS2017 
+Muestra
+Conjunto de flujos balanceado con ataques DDoS y tráfico legítimo  
+Variable 1: Implementación de un sistema web
+Técnicas.
+Análisis documental, pruebas de rendimiento, monitoreo de recurso 
+Instrumentos.
+Cuestionario elaboración propia 
+Variable 2: Detección de ataques DDoS
+Técnicas.
+Validación cruzada, pruebas de estrés, encuesta 
+Instrumentos.
+Scripts de evaluación, cuestionario de utilidad percibida, guía de observación 
+Arquitectura Conv1D
+Número de capas, filtros y funciones de activación
+Arquitectura e integración web
+Tiempo de respuesta de FastAPI (ms), funcionamiento del endpoint e integración con el dashboard
+Visualización y generación de alertas
+Clasificación visual, actualización del dashboard y generación de alertas
+Viabilidad computacional
+Consumo promedio y máximo de CPU y memoria RAM
+Variable Y = Variable dependiente:
+Detección de ataques DDoS
+Capacidad de clasificación
+Precisión (Accuracy) y sensibilidad (Recall)
+Eficiencia en la detección
+Latencia de inferencia(ms) y tiempo de detección.
+Tasa de falsas alarmas
+Tasa de falsos positivos, FPR
+ANEXO 2 - MATRIZ OPERACIONAL
+Variables
+Definición conceptual
+Definición operacional
+Dimensión
+Indicadores
+Ítem / forma de medición
+Escala
+Técnica
+Instrumento
+Variable Independiente:Implementación de un sistema web de detección temprana de ataques DDoS basado en una red neuronal convolucional unidimensional (Conv1D)
+Sistema informático que integra un modelo de aprendizaje profundo basado en una red neuronal convolucional unidimensional (Conv1D), un proceso de preprocesamiento de métricas de tráfico de red, una API desarrollada en FastAPI y un dashboard web para clasificar flujos como tráfico normal o DDoS y emitir alertas tempranas.[32]
+Se evalúa mediante el desempeño técnico del sistema, considerando la configuración del modelo, el consumo de recursos computacionales y la funcionalidad de la interfaz. Se utilizan pruebas de rendimiento, monitoreo de recursos y pruebas de usabilidad.
+Preprocesamiento y entrenamiento
+Normalización de métricas de tráfico
+Aplicación de normalización Min-Max a las características seleccionadas: x' = (x − xmin) / (xmax − xmin)
+aplicada / no aplicada
+Experimentación
+entrenamiento en Python
+Balanceo de clases
+Porcentaje de clase = (registros de la clase / total de registros) × 100
+porcentaje (%)
+Arquitectura Conv1D
+Configuración de capas convolucionales
+Número de capas Conv1D
+valores numéricos
+Hiperparámetros de entrenamiento
+Valores de tasa de aprendizaje
+milisegundos (ms)
+Integración web y alertas
+Tiempo de respuesta de la API
+TAPI = tiempo de respuesta HTTP − tiempo de solicitud HTTP
+valores numéricos
+Correcta emisión y visualización de alertas
+(N. de alertas emitidas y visualizadas correctamente / número de alertas esperadas) × 100
+porcentaje (%)
+Viabilidad computacional
+Uso de CPU
+Promedio y valor máximo del porcentaje de CPU consumido durante la inferencia y emisión de alertas.
+porcentaje (%)
+Uso de memoria RAM
+Promedio y valor máximo de memoria RAM utilizada durante la inferencia y emisión de alertas.
+megabytes (MB) o gigabytes (GB)
+Variable Dependiente:Desempeño en la detección de ataques DDoS, operacionalizado mediante las métricas de precisión (accuracy), sensibilidad (recall), tiempo de detección (latencia) y tasa de falsos positivos (FPR
+Capacidad del sistema para identificar correctamente ataques DDoS (precisión y sensibilidad), minimizar falsas alarmas (FPR) y responder en tiempo oportuno (latencia), medida sobre conjuntos de datos etiquetados y en pruebas de validación.[33]
+Se evalúa mediante métricas de clasificación calculadas con el dataset CICIDS2017, mediciones de latencia de inferencia y encuestas de percepción de utilidad a administradores de red. La validación pasiva con logs reales solo permite medir consumo de recursos y funcionalidad, no precisión ni sensibilidad.
+Capacidad de clasificación
+Precisión global (Accuracy)
+Accuracy = (VP + VN) / (VP + VN + FP + FN) × 100
+porcentaje (%)
+Evaluación experimental del modelo
+Scripts de evaluación en Python
+Sensibilidad (Recall)
+Recall = VP / (VP + FN) × 100
+porcentaje (%)
+Tasa de falsas alarmas
+Tasa de falsos positivos (FPR)
+FPR = FP / (FP + VN) × 100
+porcentaje (%)
+Eficiencia en la detección
+Latencia de inferencia
+Tinferencia = tiempo de salida del modelo − tiempo de entrada al modelo
+porcentaje (%)
+Latencia total de detección
+Ttotal = tiempo de visualización de la alerta en el dashboard − tiempo de recepción del flujo de red
+porcentaje (%)
+Funcionamiento operativo
+Porcentaje de alertas emitidas correctamente
+(Número de alertas emitidas para flujos clasificados como DDoS / número de flujos clasificados como DDoS) × 100
+porcentaje (%)

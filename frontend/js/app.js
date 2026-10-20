@@ -82,23 +82,42 @@ const distributionChart = new Chart(ctxDist, {
 });
 
 // 3. Sincronización Inicial con la Base de Datos
+// 3. Sincronización Inicial con la Base de Datos y Modelo
 async function loadInitialData() {
     try {
-        const statsRes = await fetch('/api/stats');
+        const [statsRes, modelRes] = await Promise.all([
+            fetch('/api/stats'),
+            fetch('/api/model').catch(() => null)
+        ]);
+
         const stats = await statsRes.json();
         totalCount = stats.total || 0;
         normalCount = stats.normal || 0;
         ddosCount = stats.ddos || 0;
 
-        // MODIFICACIÓN 2: Si el backend envía promedio o acumulado previo, inicializarlo
-        if (stats.avg_accuracy) {
-            totalConfidenceAccumulated = stats.avg_accuracy * totalCount;
-            updateKPIs();
-            document.getElementById('kpiAccuracy').innerText = `${stats.avg_accuracy.toFixed(2)}%`;
-        } else {
-            updateKPIs();
+        // Soporte tanto para avg_confidence (backend real) como avg_accuracy
+        const avgConfidence = stats.avg_confidence ?? stats.avg_accuracy;
+        if (avgConfidence !== null && avgConfidence !== undefined) {
+            totalConfidenceAccumulated = avgConfidence * totalCount;
+            const elAcc = document.getElementById('kpiAccuracy');
+            if (elAcc) elAcc.innerText = `${parseFloat(avgConfidence).toFixed(2)}%`;
         }
 
+        if (modelRes && modelRes.ok) {
+            const modelInfo = await modelRes.json();
+            if (modelInfo.test_metrics) {
+                // Tasa de falsos positivos experimental de la investigación (Tesis PE1 / HE1)
+                const elFPR = document.getElementById('kpiFPR');
+                if (elFPR && modelInfo.test_metrics.fpr !== undefined) {
+                    const fprVal = (modelInfo.test_metrics.fpr * 100).toFixed(2);
+                    elFPR.innerText = `${fprVal}%`;
+                    const fprBar = document.getElementById('fprBar');
+                    if (fprBar) fprBar.style.width = `${Math.min(Math.max(parseFloat(fprVal) * 10, 4), 100)}%`;
+                }
+            }
+        }
+
+        updateKPIs();
         updateDistribution();
 
         const historyRes = await fetch('/api/history?limit=10');
@@ -137,8 +156,12 @@ function connectWebSocket() {
     const socket = new WebSocket(`${proto}//${window.location.host}/ws/traffic`);
 
     socket.onmessage = (event) => {
-        const data = JSON.parse(event.data);
-        processIncomingFlow(data);
+        try {
+            const data = JSON.parse(event.data);
+            processIncomingFlow(data);
+        } catch (err) {
+            console.error('Error parseando mensaje WebSocket:', err);
+        }
     };
 
     socket.onclose = () => {
@@ -147,43 +170,89 @@ function connectWebSocket() {
 }
 connectWebSocket();
 
-// 6. Manejo de Flujos Entrantes
+// 6. Manejo de Flujos Entrantes (Soporta individual y por lotes)
+let isDistributionUpdateScheduled = false;
+
 function processIncomingFlow(data) {
-    totalCount++;
-    if (data.is_attack) {
-        ddosCount++;
-        currentSecondDDoS++;
-        document.getElementById('globalStatus').className = 'status-indicator status-attack';
-        document.getElementById('statusText').innerText = 'ALERTA: DDOS DETECTADO';
-        document.getElementById('lastDetectionTime').innerText = `Última alerta: ${data.timestamp}`;
-    } else {
-        normalCount++;
-        currentSecondNormal++;
-        if (ddosCount === 0 || totalCount % 10 === 0) {
-            document.getElementById('globalStatus').className = 'status-indicator status-safe';
-            document.getElementById('statusText').innerText = 'RED SEGURA';
+    if (!data) return;
+
+    if (data.type === 'batch') {
+        const batchTotal = data.total || 0;
+        const batchDDoS = data.ddos || 0;
+        const batchBenign = data.benign !== undefined ? data.benign : (batchTotal - batchDDoS);
+
+        totalCount += batchTotal;
+        ddosCount += batchDDoS;
+        normalCount += batchBenign;
+        currentSecondDDoS += batchDDoS;
+        currentSecondNormal += batchBenign;
+
+        if (batchDDoS > 0) {
+            document.getElementById('globalStatus').className = 'status-indicator status-attack';
+            document.getElementById('statusText').innerText = `ALERTA: ${batchDDoS} ATAQUES DETECTADOS`;
+            document.getElementById('lastDetectionTime').innerText = `Última alerta: ${data.timestamp || '--:--:--'}`;
+        } else {
+            if (ddosCount === 0 || totalCount % 10 === 0) {
+                document.getElementById('globalStatus').className = 'status-indicator status-safe';
+                document.getElementById('statusText').innerText = 'RED SEGURA';
+            }
         }
+
+        if (Array.isArray(data.flows)) {
+            data.flows.forEach(f => {
+                const confVal = parseFloat(f.confidence_percentage ?? f.confidence ?? 99.0);
+                totalConfidenceAccumulated += confVal;
+                addTableRow(f, true);
+            });
+        }
+    } else {
+        // Flujo individual
+        totalCount++;
+        if (data.is_attack) {
+            ddosCount++;
+            currentSecondDDoS++;
+            document.getElementById('globalStatus').className = 'status-indicator status-attack';
+            document.getElementById('statusText').innerText = 'ALERTA: DDOS DETECTADO';
+            document.getElementById('lastDetectionTime').innerText = `Última alerta: ${data.timestamp || '--:--:--'}`;
+        } else {
+            normalCount++;
+            currentSecondNormal++;
+            if (ddosCount === 0 || totalCount % 10 === 0) {
+                document.getElementById('globalStatus').className = 'status-indicator status-safe';
+                document.getElementById('statusText').innerText = 'RED SEGURA';
+            }
+        }
+
+        const confidenceVal = parseFloat(data.confidence_percentage ?? data.confidence ?? 99.0);
+        totalConfidenceAccumulated += confidenceVal;
+        addTableRow(data, true);
     }
 
-    // MODIFICACIÓN 3: Pasar el valor de confianza del flujo entrante
-    const confidenceVal = parseFloat(data.confidence_percentage ?? data.confidence ?? 0);
-    updateKPIs(confidenceVal);
+    updateKPIs();
 
-    updateDistribution();
-    addTableRow(data, true);
+    // Throttled Chart Update: evita congelar el navegador durante ataques masivos
+    if (!isDistributionUpdateScheduled) {
+        isDistributionUpdateScheduled = true;
+        requestAnimationFrame(() => {
+            updateDistribution();
+            isDistributionUpdateScheduled = false;
+        });
+    }
 }
 
-// MODIFICACIÓN 4: Actualización dinámica de KPIs y Precisión
+// Actualización dinámica de KPIs basada en telemetría real
 function updateKPIs() {
     const elTotal = document.getElementById('kpiTotal');
     const elDDoS = document.getElementById('kpiDDoS');
     const elAcc = document.getElementById('kpiAccuracy');
-    const elFPR = document.getElementById('kpiFPR');
 
     if (elTotal) elTotal.innerText = totalCount.toLocaleString();
     if (elDDoS) elDDoS.innerText = ddosCount.toLocaleString();
-    if (elAcc) elAcc.innerText = "99.93%";
-    if (elFPR) elFPR.innerText = "0.04%";
+    
+    if (elAcc && totalCount > 0 && totalConfidenceAccumulated > 0) {
+        const avgConf = (totalConfidenceAccumulated / totalCount).toFixed(2);
+        elAcc.innerText = `${avgConf}%`;
+    }
 }
 
 function updateDistribution() {
@@ -192,17 +261,22 @@ function updateDistribution() {
 }
 
 function addTableRow(item, prepend = true) {
+    if (!item) return;
     const tbody = document.getElementById('eventsTableBody');
     const row = document.createElement('tr');
-    const badgeClass = item.is_attack ? 'badge bg-danger' : 'badge bg-success';
+    const isAttack = item.is_attack || item.prediction === 'DDoS';
+    const badgeClass = isAttack ? 'badge bg-danger' : 'badge bg-success';
+    const predictionText = item.prediction || (isAttack ? 'DDoS' : 'BENIGN');
     const timeFormatted = item.timestamp ? item.timestamp.split('T').pop().substring(0, 8) : '--:--:--';
+    const conf = item.confidence_percentage !== undefined ? `${item.confidence_percentage}%` : '--';
+    const prob = item.probability !== undefined ? item.probability : (isAttack ? 0.99 : 0.01);
 
     row.innerHTML = `
         <td class="fw-semibold text-secondary">${timeFormatted}</td>
         <td><span class="badge bg-light text-dark border">${item.protocol || 'TCP'}</span></td>
-        <td><span class="${badgeClass}">${item.prediction}</span></td>
-        <td>${item.confidence_percentage}%</td>
-        <td class="text-muted">${item.probability}</td>
+        <td><span class="${badgeClass}">${predictionText}</span></td>
+        <td>${conf}</td>
+        <td class="text-muted">${prob}</td>
         <td><span class="text-muted small"><i class="bi bi-shield-check"></i> Monitoreado</span></td>
     `;
 

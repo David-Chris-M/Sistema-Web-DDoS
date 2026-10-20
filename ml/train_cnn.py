@@ -45,6 +45,8 @@ X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
 
+from imblearn.over_sampling import SMOTE
+
 # 6. Normalizacion
 print("[*] Normalizando datos...")
 scaler = StandardScaler()
@@ -56,14 +58,22 @@ os.makedirs("models", exist_ok=True)
 joblib.dump(scaler, os.path.join("models", "scaler.pkl"))
 print("[*] Escalador guardado en: models/scaler.pkl")
 
-# 7. Redimensionamiento para Conv1D: (muestras, caracteristicas, canales)
-X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], 1))
+# 7. Aplicacion de SMOTE (Requerimiento Formal de Tesis PE1 / HE1)
+print("[*] Aplicando balanceo de clases con SMOTE...")
+print(f"    Distribución antes de SMOTE: Benign={np.sum(y_train==0)}, DDoS={np.sum(y_train==1)}")
+smote = SMOTE(random_state=42)
+X_train_res, y_train = smote.fit_resample(X_train, y_train)
+print(f"    Distribución después de SMOTE: Benign={np.sum(y_train==0)}, DDoS={np.sum(y_train==1)}")
+
+# 8. Redimensionamiento para Conv1D: (muestras, caracteristicas, canales)
+X_train = X_train_res.reshape((X_train_res.shape[0], X_train_res.shape[1], 1))
 X_test = X_test.reshape((X_test.shape[0], X_test.shape[1], 1))
 
-# 8. Construccion de la arquitectura Conv1D
+# 9. Construccion de la arquitectura Conv1D
 print("[*] Configurando red neuronal Conv1D...")
 model = models.Sequential([
-    layers.Conv1D(filters=32, kernel_size=3, activation='relu', input_shape=(X_train.shape[1], 1)),
+    layers.Input(shape=(X_train.shape[1], 1)),
+    layers.Conv1D(filters=32, kernel_size=3, activation='relu'),
     layers.MaxPooling1D(pool_size=2),
     layers.Dropout(0.2),
 

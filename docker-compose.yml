@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # 1. Base de Datos PostgreSQL de Producción
   db:
@@ -29,9 +27,40 @@ services:
       db:
         condition: service_healthy
     environment:
-      - DATABASE_URL=postgresql://cybershield_user:cybershield_secure_pass@db:5432/cybershield_pyme
+      - DATABASE_URL=postgresql+psycopg2://cybershield_user:cybershield_secure_pass@db:5432/cybershield_pyme
+      - SENSOR_API_KEY=${SENSOR_API_KEY:-CyberShield_Pyme_SecureToken_2026}
+      - ENABLE_SIMULATION=${ENABLE_SIMULATION:-false}
+      - RETENTION_DAYS=${RETENTION_DAYS:-30}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
     ports:
       - "8000:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # 3. Sensor NIDS Perimetral en Vivo (Activar en host Linux para captura real 24/7)
+  # Para iniciar junto con el API: docker compose --profile with-sensor up -d
+  sensor:
+    build: .
+    container_name: cybershield_sensor
+    restart: always
+    network_mode: "host"
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      - API_BATCH_URL=http://127.0.0.1:8000/api/predict/batch
+      - SENSOR_API_KEY=${SENSOR_API_KEY:-CyberShield_Pyme_SecureToken_2026}
+      - SNIFF_IFACE=${SNIFF_IFACE:-eth0}
+    command: ["python", "-m", "sensor.live_traffic_sniffer"]
+    profiles:
+      - with-sensor
 
 volumes:
   postgres_data:

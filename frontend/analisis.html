@@ -60,7 +60,7 @@
                 <a class="nav-link" href="/frontend/"><i class="bi bi-speedometer2"></i> Monitor en Vivo</a>
             </li>
             <li class="nav-item">
-                <a class="nav-link" href="/frontend/analisis.html"><i class="bi bi-graph-up"></i> Análisis Forense</a>
+                <a class="nav-link active" href="/frontend/analisis.html"><i class="bi bi-graph-up"></i> Análisis Forense</a>
             </li>
             <li class="nav-item">
                 <a class="nav-link" href="/frontend/rendimiento.html"><i class="bi bi-cpu"></i> Rendimiento</a>
@@ -85,9 +85,14 @@
                 <span class="status-safe"><i class="bi bi-database-check me-1"></i> HISTÓRICO FORENSE</span>
                 <span class="text-muted small" id="currentTime"></span>
             </div>
-            <a href="/api/export/csv" class="btn btn-sm btn-outline-success fw-semibold">
-                <i class="bi bi-file-earmark-spreadsheet"></i> Descargar Reporte CSV
-            </a>
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-primary fw-semibold" data-bs-toggle="modal" data-bs-target="#importCsvModal">
+                    <i class="bi bi-upload"></i> Cargar Logs CSV Pyme
+                </button>
+                <a href="/api/export/csv" class="btn btn-sm btn-outline-success fw-semibold">
+                    <i class="bi bi-file-earmark-spreadsheet"></i> Descargar Reporte CSV
+                </a>
+            </div>
         </div>
 
         <!-- Filtros de Base de Datos -->
@@ -100,6 +105,7 @@
                             <option value="all">Todos los Protocolos</option>
                             <option value="TCP">TCP</option>
                             <option value="UDP">UDP</option>
+                            <option value="ICMP">ICMP</option>
                         </select>
                     </div>
                     <div class="col-md-4">
@@ -148,8 +154,7 @@
             <div class="table-container">
                 <table class="table table-hover align-middle mb-0">
                     <thead>
-                        <thead>
-                            <tr>
+                        <tr>
                                 <th>Hora</th>
                                 <th>IP Origen</th>
                                 <th>IP Destino</th>
@@ -171,6 +176,35 @@
         </div>
     </div>
 
+    <!-- Modal de Importación Pasiva de Logs CSV (Ley N° 29733 / PE4 / OE4) -->
+    <div class="modal fade" id="importCsvModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold"><i class="bi bi-shield-lock text-primary me-2"></i>Validación Pasiva de Logs CSV (Pyme)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="small text-muted mb-3">
+                        Carga el historial de tráfico exportado de la Pyme. El sistema aplicará anonimización de direcciones IP conforme a la <strong>Ley N° 29733</strong> e inferirá los flujos con el modelo Conv1D sin interrumpir las operaciones.
+                    </p>
+                    <div class="mb-3">
+                        <label class="form-label small fw-semibold">Seleccionar archivo CSV:</label>
+                        <input type="file" class="form-control form-control-sm" id="csvFileInput" accept=".csv">
+                    </div>
+                    <div id="importResult" class="d-none"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+                    <button type="button" class="btn btn-primary btn-sm" id="btnUploadCsv" onclick="uploadCsvLogs()">
+                        <i class="bi bi-cpu"></i> Evaluar con Conv1D
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="/frontend/js/analisis.js"></script>
 </body>
 </html>

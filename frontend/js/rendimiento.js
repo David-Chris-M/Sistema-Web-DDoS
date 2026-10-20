@@ -98,9 +98,12 @@ async function updateTelemetry() {
         const res = await fetch('/api/performance');
         const data = await res.json();
 
-        // Actualizar KPIs
-        document.getElementById('kpiLatency').innerText = `${data.inference_latency_ms} ms`;
-        document.getElementById('kpiEndToEnd').innerText = `${data.end_to_end_ms} ms`;
+        // Actualizar KPIs de manera resiliente (evita "null ms" si no hay tráfico reciente)
+        const latVal = data.inference_latency_ms !== null && data.inference_latency_ms !== undefined ? `${data.inference_latency_ms} ms` : '0.0 ms';
+        const e2eVal = data.end_to_end_ms !== null && data.end_to_end_ms !== undefined ? `${data.end_to_end_ms} ms` : 'En espera';
+        
+        document.getElementById('kpiLatency').innerText = latVal;
+        document.getElementById('kpiEndToEnd').innerText = e2eVal;
         document.getElementById('kpiCpu').innerText = `${data.cpu_percent}%`;
         document.getElementById('cpuBar').style.width = `${Math.min(data.cpu_percent, 100)}%`;
         document.getElementById('kpiRam').innerText = `${data.ram_mb} MB`;
@@ -113,15 +116,15 @@ async function updateTelemetry() {
         resourceChart.data.labels.shift();
         resourceChart.data.labels.push(now);
         resourceChart.data.datasets[0].data.shift();
-        resourceChart.data.datasets[0].data.push(data.cpu_percent);
+        resourceChart.data.datasets[0].data.push(data.cpu_percent || 0);
         resourceChart.data.datasets[1].data.shift();
-        resourceChart.data.datasets[1].data.push(data.ram_mb);
+        resourceChart.data.datasets[1].data.push(data.ram_mb || 0);
         resourceChart.update();
 
         latencyChart.data.labels.shift();
         latencyChart.data.labels.push(now);
         latencyChart.data.datasets[0].data.shift();
-        latencyChart.data.datasets[0].data.push(data.inference_latency_ms);
+        latencyChart.data.datasets[0].data.push(data.inference_latency_ms || 0);
         latencyChart.update();
 
     } catch (e) {
