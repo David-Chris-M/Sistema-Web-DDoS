@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>CyberShield Pyme - Configuración del Sistema</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --sidebar-width: 250px;
+            --primary: #0f172a;
+            --sidebar-hover: #1e293b;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --bg-light: #f8fafc;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-light);
+            color: #334155;
+            overflow-x: hidden;
+        }
+
+        /* --- Barra Lateral --- */
+        .sidebar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: var(--sidebar-width);
+            height: 100vh;
+            background-color: var(--primary);
+            color: white;
+            padding: 1.25rem 1rem;
+            z-index: 1000;
+        }
+
+        .sidebar .nav-link {
+            color: #94a3b8;
+            border-radius: 8px;
+            margin-bottom: 6px;
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 500;
+            transition: all 0.2s;
+            text-decoration: none;
+        }
+
+        .sidebar .nav-link:hover, .sidebar .nav-link.active {
+            background-color: var(--sidebar-hover);
+            color: #f8fafc;
+        }
+
+        /* --- Contenido Principal --- */
+        .content {
+            margin-left: var(--sidebar-width);
+            padding: 24px;
+            min-height: 100vh;
+        }
+
+        /* --- Barra Superior --- */
+        .topbar {
+            background: white;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 999;
+            margin: -24px -24px 24px -24px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+        }
+
+        .status-safe {
+            color: var(--success);
+            background: #d1fae5;
+            padding: 6px 14px;
+            border-radius: 9999px;
+            font-weight: 700;
+            font-size: 0.85rem;
+            display: inline-flex;
+            align-items: center;
+        }
+
+        /* --- Tarjetas de Configuración --- */
+        .config-card {
+            background: white;
+            border-radius: 14px;
+            padding: 24px;
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.03);
+            margin-bottom: 24px;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .config-card:hover {
+            box-shadow: 0 4px 12px rgba(0,0,0,0.06);
+        }
+
+        .config-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #f1f5f9;
+        }
+
+        .config-icon {
+            width: 42px;
+            height: 42px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.25rem;
+        }
+
+        .setting-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 14px 0;
+            border-bottom: 1px dashed #f1f5f9;
+        }
+
+        .setting-item:last-child {
+            border-bottom: none;
+            padding-bottom: 0;
+        }
+
+        .setting-label {
+            font-weight: 600;
+            font-size: 0.92rem;
+            color: #1e293b;
+            margin-bottom: 2px;
+        }
+
+        .setting-desc {
+            font-size: 0.80rem;
+            color: #64748b;
+            margin-bottom: 0;
+        }
+
+        .form-switch .form-check-input {
+            width: 2.75em;
+            height: 1.4em;
+            cursor: pointer;
+        }
+
+        .badge-value {
+            font-size: 0.80rem;
+            padding: 5px 12px;
+            border-radius: 20px;
+            font-weight: 600;
+        }
+    </style>
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('cybershield_tema_visual');
+                if (t === 'gris') document.documentElement.classList.add('tema-gris');
+                else if (t === 'oscuro') document.documentElement.classList.add('tema-oscuro');
+            } catch (_) {}
+        })();
+    </script>
+    <style id="cybershield-anti-fouc">
+        html.tema-gris, html.tema-gris body { background-color: #cbd5e1 !important; color: #0f172a !important; }
+        html.tema-gris .topbar, html.tema-gris .kpi-card, html.tema-gris .chart-card, html.tema-gris .config-card {
+            background-color: #e2e8f0 !important; border-color: #94a3b8 !important; color: #0f172a !important;
+        }
+        html.tema-oscuro, html.tema-oscuro body { background-color: #0b1120 !important; color: #e2e8f0 !important; }
+        html.tema-oscuro .topbar, html.tema-oscuro .kpi-card, html.tema-oscuro .chart-card, html.tema-oscuro .config-card {
+            background-color: #1e293b !important; border-color: #334155 !important; color: #f1f5f9 !important;
+        }
+        html.tema-oscuro .form-select, html.tema-oscuro .form-control, html.tema-oscuro .bg-light {
+            background-color: #0f172a !important; color: #cbd5e1 !important; border-color: #334155 !important;
+        }
+        html.tema-oscuro .text-dark, html.tema-oscuro h4, html.tema-oscuro h5, html.tema-oscuro h6, html.tema-oscuro .setting-label {
+            color: #f8fafc !important;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Barra Lateral -->
+    <div class="sidebar d-flex flex-column">
+        <div class="d-flex align-items-center mb-4 px-2">
+            <i class="bi bi-shield-check fs-3 text-info me-2"></i>
+            <h5 class="mb-0 fw-bold">CyberShield</h5>
+        </div>
+        <ul class="nav flex-column">
+            <li class="nav-item">
+                <a class="nav-link" href="/frontend/"><i class="bi bi-speedometer2"></i> Monitor en Vivo</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" href="/frontend/analisis.html"><i class="bi bi-graph-up"></i> Análisis Forense</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" href="/frontend/rendimiento.html"><i class="bi bi-cpu"></i> Rendimiento</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" href="/frontend/alertas.html"><i class="bi bi-exclamation-triangle"></i> Alertas</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link active" href="/frontend/configuracion.html"><i class="bi bi-gear-fill"></i> Configuración</a>
+            </li>
+            <li class="nav-item">
+                <a class="nav-link" href="/docs" target="_blank"><i class="bi bi-code-slash"></i> API Swagger</a>
+            </li>
+        </ul>
+        
+        <div class="mt-auto p-2 bg-dark bg-opacity-25 rounded small text-secondary">
+            <div><i class="bi bi-cpu"></i> NIDS: Conv1D (Capas 3 y 4)</div>
+            <div><i class="bi bi-sliders"></i> Perfil: Operador Pyme</div>
+        </div>
+    </div>
+
+    <!-- Contenido Principal -->
+    <div class="content">
+
+        <!-- Barra Superior -->
+        <div class="topbar shadow-sm">
+            <div class="d-flex align-items-center gap-3">
+                <span class="status-safe">
+                    <i class="bi bi-sliders me-1"></i> PANEL DE CONFIGURACIÓN
+                </span>
+                <span class="text-muted small d-none d-md-inline">Ajustes del Sistema NIDS y Preferencias de Interfaz</span>
+            </div>
+
+            <div class="d-flex align-items-center gap-2">
+                <button class="btn btn-sm btn-outline-secondary fw-semibold px-3 py-2 rounded-pill shadow-sm" onclick="restablecerValoresFabrica()">
+                    <i class="bi bi-arrow-counterclockwise me-1"></i> Restablecer Valores
+                </button>
+                <a href="/frontend/" class="btn btn-sm btn-primary fw-semibold px-3 py-2 rounded-pill shadow-sm">
+                    <i class="bi bi-arrow-left me-1"></i> Volver al Monitor
+                </a>
+            </div>
+        </div>
+
+        <div class="row g-4">
+
+            <!-- Columna Izquierda: Visualización y Alarma -->
+            <div class="col-lg-6">
+
+                <!-- 1. Visualización e Interfaz -->
+                <div class="config-card">
+                    <div class="config-header">
+                        <div class="config-icon bg-primary-subtle text-primary">
+                            <i class="bi bi-display"></i>
+                        </div>
+                        <div>
+                            <h6 class="fw-bold mb-0 text-dark">Visualización e Interfaz de Operación</h6>
+                            <small class="text-muted">Ajusta el tema visual anti-fatiga y los controles visibles del panel</small>
+                        </div>
+                    </div>
+
+                    <div class="setting-item flex-wrap gap-2">
+                        <div>
+                            <div class="setting-label"><i class="bi bi-palette2 text-primary me-1"></i>Tema Visual (Descanso Visual / Anti-Fatiga)</div>
+                            <p class="setting-desc">Cambia todas las pantallas a modo Gris Suave u Oscuro SOC para no fatigar la vista.</p>
+                        </div>
+                        <div class="btn-group btn-group-sm shadow-sm" role="group" aria-label="Selector de tema visual">
+                            <button type="button" class="btn btn-outline-secondary fw-semibold px-3" id="btnTemaClaro" onclick="cambiarTemaVisual('claro')">
+                                <i class="bi bi-sun-fill text-warning me-1"></i>Claro
+                            </button>
+                            <button type="button" class="btn btn-outline-secondary fw-semibold px-3" id="btnTemaGris" onclick="cambiarTemaVisual('gris')">
+                                <i class="bi bi-cloud-fill text-secondary me-1"></i>Gris Descanso
+                            </button>
+                            <button type="button" class="btn btn-outline-secondary fw-semibold px-3" id="btnTemaOscuro" onclick="cambiarTemaVisual('oscuro')">
+                                <i class="bi bi-moon-stars-fill text-info me-1"></i>Oscuro SOC
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Modo Demostración / Consola de Pruebas</div>
+                            <p class="setting-desc">Muestra el botón y panel de inyección de tráfico sintético en la cabecera. Desactivar en producción real.</p>
+                        </div>
+                        <div class="form-check form-switch ps-0">
+                            <input class="form-check-input ms-auto" type="checkbox" id="switchMostrarConsola" checked>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Selector Rápido de Alarma en Cabecera</div>
+                            <p class="setting-desc">Permite cambiar entre Sirena Táctica, Radar y Silencio desde la barra superior del monitor.</p>
+                        </div>
+                        <div class="form-check form-switch ps-0">
+                            <input class="form-check-input ms-auto" type="checkbox" id="switchMostrarSelector" checked>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Acceso a Documentación API Swagger en Menú Lateral</div>
+                            <p class="setting-desc">Muestra u oculta el botón técnico "API Swagger" (/docs) en la barra lateral de todas las ventanas.</p>
+                        </div>
+                        <div class="form-check form-switch ps-0">
+                            <input class="form-check-input ms-auto" type="checkbox" id="switchMostrarSwagger" checked>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 2. Centro de Control Acústico y Táctico -->
+                <div class="config-card">
+                    <div class="config-header">
+                        <div class="config-icon bg-danger-subtle text-danger">
+                            <i class="bi bi-megaphone-fill"></i>
+                        </div>
+                        <div>
+                            <h6 class="fw-bold mb-0 text-dark">Alertas Acústicas y Gestión de Voces</h6>
+                            <small class="text-muted">Personalización de voces en español, frases libres, tono y acústica</small>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Modo Acústico Predeterminado</div>
+                            <p class="setting-desc">Perfil de alarma sonora ante ataques de red</p>
+                        </div>
+                        <div style="min-width: 190px;">
+                            <select class="form-select form-select-sm fw-medium" id="selectModoAlarma">
+                                <option value="intimidante">Sirena Táctica + Voz</option>
+                                <option value="radar">Radar Cibernético</option>
+                                <option value="silencio">Silenciado</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Perfil y Género de Voz (Español)</div>
+                            <p class="setting-desc">Catálogo de 10 voces neurales de estudio (Perú, México, España, Colombia, Argentina y Neutro)</p>
+                        </div>
+                        <div style="min-width: 310px;">
+                            <select class="form-select form-select-sm fw-medium" id="selectPerfilVoz">
+                                <optgroup label="🇵🇪 Perú">
+                                    <option value="voz_pe_alex">🇵🇪 Alex (Hombre - Táctica Militar Grave)</option>
+                                    <option value="voz_pe_camila">🇵🇪 Camila (Mujer - Alerta Nítida)</option>
+                                </optgroup>
+                                <optgroup label="🇲🇽 México">
+                                    <option value="voz_mx_jorge">🇲🇽 Jorge (Hombre - Autoridad y Firmeza)</option>
+                                    <option value="voz_mx_dalia">🇲🇽 Dalia (Mujer - Ejecutiva Seria)</option>
+                                </optgroup>
+                                <optgroup label="🇪🇸 España">
+                                    <option value="voz_es_alvaro">🇪🇸 Álvaro (Hombre - Grave y Sobrio)</option>
+                                    <option value="voz_es_elvira">🇪🇸 Elvira (Mujer - Rápida y Enérgica)</option>
+                                </optgroup>
+                                <optgroup label="🇨🇴 Colombia">
+                                    <option value="voz_co_gonzalo">🇨🇴 Gonzalo (Hombre - Tono Táctico)</option>
+                                    <option value="voz_co_salome">🇨🇴 Salomé (Mujer - Emergencia)</option>
+                                </optgroup>
+                                <optgroup label="🇦🇷 Argentina">
+                                    <option value="voz_ar_tomas">🇦🇷 Tomás (Hombre - Tono Profundo)</option>
+                                </optgroup>
+                                <optgroup label="🇺🇸 Neutro">
+                                    <option value="voz_us_paloma">🇺🇸 Paloma (Mujer - Notificadora)</option>
+                                </optgroup>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="setting-item align-items-center">
+                        <div style="flex: 1; padding-right: 15px;">
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <div class="setting-label">Tono de la Voz (Pitch)</div>
+                                <span class="badge bg-secondary-subtle text-secondary badge-value" id="badgeTono">Grave (0.75x)</span>
+                            </div>
+                            <p class="setting-desc mb-2">Desliza a la izquierda para voz más gruesa o derecha para voz más aguda</p>
+                            <input type="range" class="form-range" id="sliderTono" min="50" max="150" value="75">
+                        </div>
+                    </div>
+
+                    <div class="setting-item align-items-center">
+                        <div style="flex: 1; padding-right: 15px;">
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <div class="setting-label">Velocidad de Locución</div>
+                                <span class="badge bg-secondary-subtle text-secondary badge-value" id="badgeVelocidad">Normal (0.95x)</span>
+                            </div>
+                            <p class="setting-desc mb-2">Ajusta la rapidez con que se pronuncia el mensaje de emergencia</p>
+                            <input type="range" class="form-range" id="sliderVelocidad" min="70" max="130" value="95">
+                        </div>
+                    </div>
+
+                    <div class="setting-item flex-column align-items-stretch">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <div class="setting-label">Frase de Locución de Emergencia</div>
+                            <small class="text-primary fw-semibold">Personalizable 100%</small>
+                        </div>
+                        <p class="setting-desc mb-2">Puedes elegir una plantilla predeterminada o escribir cualquier frase libre que el sistema reproducirá al detectar un ataque.</p>
+                        
+                        <div class="mb-2">
+                            <select class="form-select form-select-sm fw-medium mb-2" id="selectPlantillaFrase">
+                                <option value="pred_1">Plantilla 1: "Peligro. El sistema está sufriendo un ataque."</option>
+                                <option value="pred_2">Plantilla 2: "El sistema está siendo atacado, por favor implementa un plan de contingencia."</option>
+                                <option value="pred_3">Plantilla 3: "Alerta de seguridad. Intrusión detectada en la red perimetral."</option>
+                                <option value="pred_4">Plantilla 4: "Ataque DDoS detectado. Activando contramedidas de mitigación."</option>
+                                <option value="custom">-- Escribir mi propia frase libre --</option>
+                            </select>
+                            <textarea class="form-control form-control-sm" id="inputFraseTexto" rows="2" placeholder="Escribe tu frase personalizada aquí...">Peligro. El sistema está sufriendo un ataque.</textarea>
+                        </div>
+                        <div class="d-flex gap-2 justify-content-end">
+                            <button class="btn btn-sm btn-primary rounded-pill px-3 py-1 fw-semibold" id="btnGuardarFrase" onclick="guardarFraseTexto()">
+                                <i class="bi bi-check2-circle me-1"></i> Guardar Frase
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger rounded-pill px-3 py-1 fw-semibold" id="btnProbarVoz" onclick="probarVozYFraseActual()">
+                                <i class="bi bi-volume-up-fill me-1"></i> Probar Voz y Frase
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="setting-item align-items-center">
+                        <div style="flex: 1; padding-right: 15px;">
+                            <div class="d-flex justify-content-between align-items-center mb-1">
+                                <div class="setting-label">Volumen Maestro de la Alarma</div>
+                                <span class="badge bg-secondary-subtle text-secondary badge-value" id="badgeVolumen">85%</span>
+                            </div>
+                            <p class="setting-desc mb-2">Intensidad acústica global de la sirena y locución</p>
+                            <input type="range" class="form-range" id="sliderVolumen" min="0" max="100" value="85">
+                        </div>
+                        <div>
+                            <button class="btn btn-sm btn-outline-danger fw-semibold text-nowrap rounded-pill px-3 py-2" onclick="probarAlarmaCompleta()">
+                                <i class="bi bi-bell-fill me-1"></i> Probar Sirena + Voz
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Destello Perimetral Carmesí</div>
+                            <p class="setting-desc">Efecto visual pulsante en los bordes de la pantalla al detectar amenazas</p>
+                        </div>
+                        <div class="form-check form-switch ps-0">
+                            <input class="form-check-input ms-auto" type="checkbox" id="switchDestello" checked>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Banner Flotante de Emergencia</div>
+                            <p class="setting-desc">Muestra una barra de advertencia superior en cualquier ventana activa</p>
+                        </div>
+                        <div class="form-check form-switch ps-0">
+                            <input class="form-check-input ms-auto" type="checkbox" id="switchBanner" checked>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Columna Derecha: IA Conv1D y Red -->
+            <div class="col-lg-6">
+
+                <!-- 3. Parámetros del Motor de IA Conv1D -->
+                <div class="config-card">
+                    <div class="config-header">
+                        <div class="config-icon bg-success-subtle text-success">
+                            <i class="bi bi-cpu"></i>
+                        </div>
+                        <div>
+                            <h6 class="fw-bold mb-0 text-dark">Motor de Inferencia Conv1D (Deep Learning)</h6>
+                            <small class="text-muted">Parámetros del clasificador neuronal de flujos de red</small>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Umbral de Sensibilidad (Clasificación)</div>
+                            <p class="setting-desc">Probabilidad mínima requerida por la red neuronal para clasificar un flujo como ataque DDoS</p>
+                        </div>
+                        <div style="min-width: 170px;">
+                            <select class="form-select form-select-sm fw-medium" id="selectUmbralDDoS">
+                                <option value="50">50% (Estándar - Balance Óptimo)</option>
+                                <option value="75">75% (Moderado - Alta Certeza)</option>
+                                <option value="90">90% (Estricto - Ataques Críticos)</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="bg-light p-3 rounded-3 mt-3 border">
+                        <div class="d-flex align-items-center gap-2 mb-2">
+                            <i class="bi bi-info-circle-fill text-primary"></i>
+                            <span class="fw-bold small text-dark">Ficha Técnica del Modelo (PE1 / PE2)</span>
+                        </div>
+                        <ul class="list-unstyled mb-0 small text-secondary">
+                            <li class="mb-1"><i class="bi bi-check2 text-success me-1"></i> <strong>Arquitectura:</strong> Red Neuronal Convolucional 1D (Conv1D + Dropout + Dense)</li>
+                            <li class="mb-1"><i class="bi bi-check2 text-success me-1"></i> <strong>Vector de Entrada:</strong> 80 características canónicas CICFlowMeter / CICIDS2017</li>
+                            <li class="mb-1"><i class="bi bi-check2 text-success me-1"></i> <strong>Modo de Ejecución:</strong> CPU-Only (optimizada para hardware accesible de Pymes)</li>
+                            <li><i class="bi bi-check2 text-success me-1"></i> <strong>Latencia de Inferencia:</strong> Menor a 1.0 ms por flujo de red</li>
+                        </ul>
+                    </div>
+                </div>
+
+                <!-- 4. Parámetros del Sensor de Tráfico y Mitigación -->
+                <div class="config-card">
+                    <div class="config-header">
+                        <div class="config-icon bg-info-subtle text-info">
+                            <i class="bi bi-router-fill"></i>
+                        </div>
+                        <div>
+                            <h6 class="fw-bold mb-0 text-dark">Sensor de Captura y Mitigación</h6>
+                            <small class="text-muted">Parámetros del capturador en vivo y reglas de firewall</small>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Captura en Tiempo Real (Scapy)</div>
+                            <p class="setting-desc">Modo promiscuo de interfaz de red escuchando tráfico Ethernet / Wi-Fi</p>
+                        </div>
+                        <span class="badge bg-success-subtle text-success badge-value"><i class="bi bi-broadcast me-1"></i> Activo 24/7</span>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Exportación de Reglas de Cortafuegos</div>
+                            <p class="setting-desc">Formatos de mitigación compatibles para protección perimetral Pyme</p>
+                        </div>
+                        <div class="d-flex gap-1">
+                            <span class="badge bg-light text-dark border">MikroTik</span>
+                            <span class="badge bg-light text-dark border">iptables</span>
+                            <span class="badge bg-light text-dark border">nftables</span>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">Cumplimiento Normativo (Ley N° 29733)</div>
+                            <p class="setting-desc">Anonimización y ofuscación criptográfica de direcciones IP en validaciones forenses</p>
+                        </div>
+                        <span class="badge bg-primary-subtle text-primary badge-value"><i class="bi bi-shield-lock me-1"></i> Protegido</span>
+                    </div>
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/frontend/js/alarma_global.js?v=14"></script>
+    <script src="/frontend/js/configuracion.js?v=14"></script>
+</body>
+</html>

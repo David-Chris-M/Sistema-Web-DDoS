@@ -12,39 +12,47 @@ __pycache__/
 *.dll
 *.pdb
 
-# Bases de datos
+# Bases de datos y temporales SQLite
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
 traffic_nids.db
 ddos_records.db
 
-# Modelos grandes (si pesan > 100 MB, mejor Git LFS)
+# Modelos
 ml/models/*.keras
 ml/models/*.h5
 ml/models/*.pkl
 ml/models/*.pb
+*.joblib
+*.keras
+*.h5
 
-# Datasets (no subas archivos pesados)
+# Datasets
+ml/dataset/
 ml/dataset/*.csv
 ml/dataset/*.pcap
 ml/dataset/*.pcap_ISCX.csv
+*.csv
 
-# Configuraciones de IDE
+# Configuraciones de IDE y entorno
 .vscode/
 .idea/
 *.swp
 *.swo
+.env
 
-# Logs
+# Logs y archivos de proceso
+logs/
 *.log
-
-# Archivos de sistema
+*.pid
 .DS_Store
 Thumbs.db
 desktop.ini
 
-# Archivos de compilación / distribución
+# Compilación y distribución
 dist/
 build/
 *.egg-info/

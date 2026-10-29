@@ -3,8 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>CyberShield Pyme - Telemetría de Rendimiento</title>
-    <!-- Bootstrap 5 CSS & Icons -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -58,10 +60,36 @@
             .content { margin-left: 0; }
         }
     </style>
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('cybershield_tema_visual');
+                if (t === 'gris') document.documentElement.classList.add('tema-gris');
+                else if (t === 'oscuro') document.documentElement.classList.add('tema-oscuro');
+            } catch (_) {}
+        })();
+    </script>
+    <style id="cybershield-anti-fouc">
+        html.tema-gris, html.tema-gris body { background-color: #cbd5e1 !important; color: #0f172a !important; }
+        html.tema-gris .topbar, html.tema-gris .kpi-card, html.tema-gris .chart-card, html.tema-gris .config-card,
+        html.tema-gris .card, html.tema-gris .card-body, html.tema-gris .table-container {
+            --bs-card-bg: #e2e8f0 !important;
+            background-color: #e2e8f0 !important; border-color: #94a3b8 !important; color: #0f172a !important;
+        }
+        html.tema-oscuro, html.tema-oscuro body { background-color: #0b1120 !important; color: #e2e8f0 !important; }
+        html.tema-oscuro .topbar, html.tema-oscuro .kpi-card, html.tema-oscuro .chart-card, html.tema-oscuro .config-card,
+        html.tema-oscuro .card, html.tema-oscuro .card-body, html.tema-oscuro .table-container {
+            --bs-card-bg: #1e293b !important;
+            background-color: #1e293b !important; border-color: #334155 !important; color: #f1f5f9 !important;
+        }
+        html.tema-oscuro .text-dark, html.tema-oscuro h4, html.tema-oscuro h5, html.tema-oscuro h6 {
+            color: #f8fafc !important;
+        }
+    </style>
 </head>
 <body>
 
-    <!-- Sidebar -->
+    <!-- Barra Lateral -->
     <div class="sidebar d-flex flex-column">
         <div class="d-flex align-items-center mb-4 px-2">
             <i class="bi bi-shield-check fs-3 text-info me-2"></i>
@@ -81,18 +109,21 @@
                 <a class="nav-link" href="/frontend/alertas.html"><i class="bi bi-exclamation-triangle"></i> Alertas</a>
             </li>
             <li class="nav-item">
+                <a class="nav-link" href="/frontend/configuracion.html"><i class="bi bi-gear"></i> Configuración</a>
+            </li>
+            <li class="nav-item">
                 <a class="nav-link" href="/docs" target="_blank"><i class="bi bi-code-slash"></i> API Swagger</a>
             </li>
         </ul>
         <div class="mt-auto p-2 bg-dark bg-opacity-25 rounded small text-secondary">
-            <div><i class="bi bi-cpu"></i> Arquitectura: Conv1D (CNN)</div>
+            <div><i class="bi bi-cpu"></i> NIDS: Conv1D (Capas 3 y 4)</div>
             <div><i class="bi bi-activity"></i> Telemetría: psutil API</div>
         </div>
     </div>
 
     <!-- Contenido Principal -->
     <div class="content">
-        <!-- Topbar -->
+        <!-- Barra Superior -->
         <div class="topbar shadow-sm">
             <div class="d-flex align-items-center gap-3">
                 <span class="status-badge"><i class="bi bi-activity"></i> TELEMETRÍA EN TIEMPO REAL</span>
@@ -206,6 +237,7 @@
         </div>
     </div>
 
-    <script src="/frontend/js/rendimiento.js"></script>
+    <script src="/frontend/js/alarma_global.js?v=14"></script>
+    <script src="/frontend/js/rendimiento.js?v=8"></script>
 </body>
 </html>

@@ -3,8 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>CyberShield Pyme - Gestión de Alertas</title>
-    <!-- Bootstrap 5 CSS & Icons -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -54,10 +56,45 @@
             .content { margin-left: 0; }
         }
     </style>
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('cybershield_tema_visual');
+                if (t === 'gris') document.documentElement.classList.add('tema-gris');
+                else if (t === 'oscuro') document.documentElement.classList.add('tema-oscuro');
+            } catch (_) {}
+        })();
+    </script>
+    <style id="cybershield-anti-fouc">
+        html.tema-gris, html.tema-gris body { background-color: #cbd5e1 !important; color: #0f172a !important; }
+        html.tema-gris .topbar, html.tema-gris .kpi-card, html.tema-gris .chart-card, html.tema-gris .config-card,
+        html.tema-gris .card, html.tema-gris .card-body, html.tema-gris .table-container, html.tema-gris .table,
+        html.tema-gris tr, html.tema-gris td {
+            --bs-card-bg: #e2e8f0 !important; --bs-table-bg: #e2e8f0 !important;
+            background-color: #e2e8f0 !important; border-color: #94a3b8 !important; color: #0f172a !important;
+        }
+        html.tema-gris thead, html.tema-gris .table-light, html.tema-gris th {
+            background-color: #cbd5e1 !important; color: #0f172a !important; border-color: #94a3b8 !important;
+        }
+        html.tema-oscuro, html.tema-oscuro body { background-color: #0b1120 !important; color: #e2e8f0 !important; }
+        html.tema-oscuro .topbar, html.tema-oscuro .kpi-card, html.tema-oscuro .chart-card, html.tema-oscuro .config-card,
+        html.tema-oscuro .card, html.tema-oscuro .card-body, html.tema-oscuro .table-container, html.tema-oscuro .table,
+        html.tema-oscuro tr, html.tema-oscuro td {
+            --bs-card-bg: #1e293b !important; --bs-table-bg: #1e293b !important; --bs-table-color: #e2e8f0 !important;
+            background-color: #1e293b !important; border-color: #334155 !important; color: #f1f5f9 !important;
+        }
+        html.tema-oscuro thead, html.tema-oscuro .table-light, html.tema-oscuro th,
+        html.tema-oscuro .form-select, html.tema-oscuro .form-control, html.tema-oscuro .bg-light, html.tema-oscuro .input-group-text {
+            background-color: #0f172a !important; color: #cbd5e1 !important; border-color: #334155 !important;
+        }
+        html.tema-oscuro .text-dark, html.tema-oscuro h4, html.tema-oscuro h5, html.tema-oscuro h6, html.tema-oscuro .form-label {
+            color: #f8fafc !important;
+        }
+    </style>
 </head>
 <body>
 
-    <!-- Sidebar -->
+    <!-- Barra Lateral -->
     <div class="sidebar d-flex flex-column">
         <div class="d-flex align-items-center mb-4 px-2">
             <i class="bi bi-shield-check fs-3 text-info me-2"></i>
@@ -68,24 +105,25 @@
             <li class="nav-item"><a class="nav-link" href="/frontend/analisis.html"><i class="bi bi-graph-up"></i> Análisis Forense</a></li>
             <li class="nav-item"><a class="nav-link" href="/frontend/rendimiento.html"><i class="bi bi-cpu"></i> Rendimiento</a></li>
             <li class="nav-item"><a class="nav-link active" href="/frontend/alertas.html"><i class="bi bi-exclamation-triangle"></i> Alertas</a></li>
+            <li class="nav-item"><a class="nav-link" href="/frontend/configuracion.html"><i class="bi bi-gear"></i> Configuración</a></li>
             <li class="nav-item"><a class="nav-link" href="/docs" target="_blank"><i class="bi bi-code-slash"></i> API Swagger</a></li>
         </ul>
         <div class="mt-auto p-2 bg-dark bg-opacity-25 rounded small text-secondary">
-            <div><i class="bi bi-shield-lock"></i> NIDS: Estado Pasivo</div>
+            <div><i class="bi bi-cpu"></i> NIDS: Conv1D (Capas 3 y 4)</div>
             <div><i class="bi bi-database"></i> SQLite / PostgreSQL</div>
         </div>
     </div>
 
     <!-- Contenido Principal -->
     <div class="content">
-        <!-- Topbar -->
+        <!-- Barra Superior -->
         <div class="topbar shadow-sm">
             <div class="d-flex align-items-center gap-3">
                 <span class="status-badge" id="topAlertBadge"><i class="bi bi-bell-fill"></i> MÓDULO DE ALERTAS NIDS</span>
                 <span class="text-muted small" id="currentTime"></span>
             </div>
             <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-outline-danger" onclick="simulateAlert()"><i class="bi bi-play-circle"></i> Inyectar Ataque Test</button>
+                <button class="btn btn-sm btn-outline-danger" onclick="simularAlerta()"><i class="bi bi-play-circle"></i> Inyectar Ataque Test</button>
             </div>
         </div>
 
@@ -146,6 +184,15 @@
             <div class="card-body">
                 <div class="row g-2 align-items-end">
                     <div class="col-md-3">
+                        <label class="form-label small fw-semibold"><i class="bi bi-calendar3 me-1"></i>Periodo Temporal</label>
+                        <select class="form-select form-select-sm" id="filterPeriod">
+                            <option value="all">Todo el Historial</option>
+                            <option value="day">Hoy / Último Día (24h)</option>
+                            <option value="week">Última Semana (7 días)</option>
+                            <option value="month">Último Mes (30 días)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
                         <label class="form-label small fw-semibold">Severidad</label>
                         <select class="form-select form-select-sm" id="filterSeverity">
                             <option value="all">Todas</option>
@@ -154,7 +201,7 @@
                             <option value="Media">Media (< 85%)</option>
                         </select>
                     </div>
-                    <div class="col-md-3">
+                    <div class="col-md-2">
                         <label class="form-label small fw-semibold">Protocolo</label>
                         <select class="form-select form-select-sm" id="filterProtocol">
                             <option value="all">Todos</option>
@@ -163,7 +210,7 @@
                             <option value="ICMP">ICMP</option>
                         </select>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <label class="form-label small fw-semibold">Buscar IP Origen</label>
                         <input type="text" class="form-control form-control-sm" id="searchIp" placeholder="Ej: 192.168...">
                     </div>
@@ -180,7 +227,9 @@
         <div class="table-container">
             <div class="d-flex justify-content-between align-items-center mb-3">
                 <h6 class="mb-0 fw-bold text-secondary"><i class="bi bi-shield-slash"></i> Registro Detallado de Incidentes</h6>
-                <a href="/api/export/csv" class="btn btn-sm btn-outline-secondary"><i class="bi bi-download"></i> Exportar CSV</a>
+                <div class="d-flex gap-2">
+                    <a href="/api/export/csv?prediction=DDoS" id="btnExportAlertsCsv" class="btn btn-sm btn-outline-secondary"><i class="bi bi-download"></i> Exportar CSV</a>
+                </div>
             </div>
             <div class="table-responsive">
                 <table class="table table-hover align-middle">
@@ -192,12 +241,10 @@
                             <th>Protocolo</th>
                             <th>Severidad</th>
                             <th>Confianza Conv1D</th>
-                            <th>Acción Mitigación</th>
+                            <th>Detalle Forense</th>
                         </tr>
                     </thead>
-                    <tbody id="alertsTableBody">
-                        <!-- Llenado dinámico -->
-                    </tbody>
+                    <tbody id="alertsTableBody"></tbody>
                 </table>
             </div>
 
@@ -212,27 +259,24 @@
         </div>
     </div>
 
-    <!-- Modal de Acción / Mitigación -->
+    <!-- Modal de Inspección de Alerta -->
     <div class="modal fade" id="actionModal" tabindex="-1">
         <div class="modal-dialog">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title fw-bold"><i class="bi bi-shield-x text-danger"></i> Mitigación de Amenaza</h5>
+                    <h5 class="modal-title fw-bold"><i class="bi bi-exclamation-triangle-fill text-danger"></i> Detalle de Alerta NIDS</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
-                <div class="modal-body" id="modalContent">
-                    <!-- Contenido dinámico -->
-                </div>
+                <div class="modal-body" id="modalContent"></div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
-                    <button type="button" class="btn btn-danger btn-sm" onclick="executeBlockRule()">Aplicar Regla Firewall (iptables)</button>
                 </div>
             </div>
         </div>
     </div>
 
-    <!-- Bootstrap JS -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/frontend/js/alertas.js"></script>
+    <script src="/frontend/js/alarma_global.js?v=14"></script>
+    <script src="/frontend/js/alertas.js?v=11"></script>
 </body>
 </html>

@@ -1,19 +1,24 @@
-const MAX_HISTORY = 20;
-const timeLabels = Array.from({ length: MAX_HISTORY }, (_, i) => {
-    const d = new Date(Date.now() - (MAX_HISTORY - i) * 1000);
-    return d.toLocaleTimeString();
-});
+(function () {
+    'use strict';
 
-// 1. Gráfica de Recursos (CPU y RAM)
-const ctxResource = document.getElementById('resourceChart').getContext('2d');
-const resourceChart = new Chart(ctxResource, {
+    // 1. Gráfica de Recursos de Hardware (CPU y RAM)
+    const MAX_HISTORIAL = 20;
+    const etiquetasTiempo = Array.from({ length: MAX_HISTORIAL }, (_, i) => {
+        const fecha = new Date(Date.now() - (MAX_HISTORIAL - i) * 1000);
+        return fecha.toLocaleTimeString();
+    });
+
+    const elRecursos = document.getElementById('resourceChart');
+    if (!elRecursos) return;
+    const ctxRecursos = elRecursos.getContext('2d');
+const graficoRecursos = new Chart(ctxRecursos, {
     type: 'line',
     data: {
-        labels: [...timeLabels],
+        labels: [...etiquetasTiempo],
         datasets: [
             {
                 label: 'CPU (%)',
-                data: Array(MAX_HISTORY).fill(0),
+                data: Array(MAX_HISTORIAL).fill(0),
                 borderColor: '#0284c7',
                 backgroundColor: 'rgba(2, 132, 199, 0.1)',
                 borderWidth: 2,
@@ -24,7 +29,7 @@ const resourceChart = new Chart(ctxResource, {
             },
             {
                 label: 'RAM (MB)',
-                data: Array(MAX_HISTORY).fill(0),
+                data: Array(MAX_HISTORIAL).fill(0),
                 borderColor: '#10b981',
                 backgroundColor: 'rgba(16, 185, 129, 0.05)',
                 borderWidth: 2,
@@ -59,15 +64,15 @@ const resourceChart = new Chart(ctxResource, {
     }
 });
 
-// 2. Gráfica de Latencia de Inferencia
-const ctxLatency = document.getElementById('latencyChart').getContext('2d');
-const latencyChart = new Chart(ctxLatency, {
+// 2. Gráfica de Latencia de Inferencia Conv1D
+const ctxLatencia = document.getElementById('latencyChart').getContext('2d');
+const graficoLatencia = new Chart(ctxLatencia, {
     type: 'line',
     data: {
-        labels: [...timeLabels],
+        labels: [...etiquetasTiempo],
         datasets: [{
             label: 'Latencia Conv1D (ms)',
-            data: Array(MAX_HISTORY).fill(2.5),
+            data: Array(MAX_HISTORIAL).fill(2.5),
             borderColor: '#f59e0b',
             backgroundColor: 'rgba(245, 158, 11, 0.15)',
             borderWidth: 2,
@@ -93,48 +98,60 @@ const latencyChart = new Chart(ctxLatency, {
 });
 
 // 3. Sondeo Periódico de Telemetría (1 Hz)
-async function updateTelemetry() {
+async function actualizarTelemetria() {
     try {
-        const res = await fetch('/api/performance');
-        const data = await res.json();
+        const respuesta = await fetch('/api/performance');
+        const datos = await respuesta.json();
 
-        // Actualizar KPIs
-        document.getElementById('kpiLatency').innerText = `${data.inference_latency_ms} ms`;
-        document.getElementById('kpiEndToEnd').innerText = `${data.end_to_end_ms} ms`;
-        document.getElementById('kpiCpu').innerText = `${data.cpu_percent}%`;
-        document.getElementById('cpuBar').style.width = `${Math.min(data.cpu_percent, 100)}%`;
-        document.getElementById('kpiRam').innerText = `${data.ram_mb} MB`;
-        document.getElementById('kpiRamTotal').innerText = `De ${data.total_ram_gb} GB disponibles`;
-        document.getElementById('kpiThroughput').innerText = `${data.throughput_fps} flujos/s`;
+        const valorLatencia = datos.inference_latency_ms !== null && datos.inference_latency_ms !== undefined ? `${datos.inference_latency_ms} ms` : '0.0 ms';
+        const valorExtremoAExtremo = datos.end_to_end_ms !== null && datos.end_to_end_ms !== undefined ? `${datos.end_to_end_ms} ms` : 'En espera';
 
-        // Actualizar Gráficas
-        const now = new Date().toLocaleTimeString();
+        document.getElementById('kpiLatency').innerText = valorLatencia;
+        document.getElementById('kpiEndToEnd').innerText = valorExtremoAExtremo;
+        document.getElementById('kpiCpu').innerText = `${datos.cpu_percent}%`;
+        document.getElementById('cpuBar').style.width = `${Math.min(datos.cpu_percent, 100)}%`;
+        document.getElementById('kpiRam').innerText = `${datos.ram_mb} MB`;
+        document.getElementById('kpiRamTotal').innerText = `De ${datos.total_ram_gb} GB disponibles`;
+        document.getElementById('kpiThroughput').innerText = `${datos.throughput_fps} flujos/s`;
 
-        resourceChart.data.labels.shift();
-        resourceChart.data.labels.push(now);
-        resourceChart.data.datasets[0].data.shift();
-        resourceChart.data.datasets[0].data.push(data.cpu_percent);
-        resourceChart.data.datasets[1].data.shift();
-        resourceChart.data.datasets[1].data.push(data.ram_mb);
-        resourceChart.update();
+        const ahora = new Date().toLocaleTimeString();
 
-        latencyChart.data.labels.shift();
-        latencyChart.data.labels.push(now);
-        latencyChart.data.datasets[0].data.shift();
-        latencyChart.data.datasets[0].data.push(data.inference_latency_ms);
-        latencyChart.update();
+        graficoRecursos.data.labels.shift();
+        graficoRecursos.data.labels.push(ahora);
+        graficoRecursos.data.datasets[0].data.shift();
+        graficoRecursos.data.datasets[0].data.push(datos.cpu_percent || 0);
+        graficoRecursos.data.datasets[1].data.shift();
+        graficoRecursos.data.datasets[1].data.push(datos.ram_mb || 0);
+        graficoRecursos.update();
 
-    } catch (e) {
-        console.error('Error obteniendo telemetría:', e);
+        graficoLatencia.data.labels.shift();
+        graficoLatencia.data.labels.push(ahora);
+        graficoLatencia.data.datasets[0].data.shift();
+        graficoLatencia.data.datasets[0].data.push(datos.inference_latency_ms || 0);
+        graficoLatencia.update();
+
+    } catch (error) {
+        console.error('Error obteniendo telemetría:', error);
     }
 }
 
-// Reloj
+// 4. Reloj e Inicialización
 setInterval(() => {
-    document.getElementById('currentTime').textContent = new Date().toLocaleTimeString('es-ES', {
-        weekday: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit'
-    });
+    const elReloj = document.getElementById('currentTime');
+    if (elReloj) {
+        elReloj.textContent = new Date().toLocaleTimeString('es-ES', {
+            weekday: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit'
+        });
+    }
 }, 1000);
 
-setInterval(updateTelemetry, 1000);
-updateTelemetry();
+setInterval(actualizarTelemetria, 1000);
+actualizarTelemetria();
+
+    window.actualizarTelemetria = actualizarTelemetria;
+    window.updateTelemetry = actualizarTelemetria;
+    window.graficoRecursos = graficoRecursos;
+    window.resourceChart = graficoRecursos;
+    window.graficoLatencia = graficoLatencia;
+    window.latencyChart = graficoLatencia;
+})();

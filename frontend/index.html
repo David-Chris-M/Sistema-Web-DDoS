@@ -3,13 +3,15 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>CyberShield Pyme - NIDS Conv1D</title>
-    <!-- Bootstrap 5 CSS & Icons -->
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>CyberShield Pyme - Monitor en Vivo (NIDS Conv1D)</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
-    <!-- Google Fonts & Chart.js -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
     <style>
         :root {
             --sidebar-width: 250px;
@@ -19,57 +21,265 @@
             --danger: #ef4444;
             --bg-light: #f8fafc;
         }
-        body { font-family: 'Inter', sans-serif; background-color: var(--bg-light); overflow-x: hidden; }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-light);
+            overflow-x: hidden;
+        }
+
+        /* --- Barra Lateral --- */
         .sidebar {
-            position: fixed; top: 0; left: 0; width: var(--sidebar-width); height: 100vh;
-            background-color: var(--primary); color: white; padding: 1.25rem 1rem; z-index: 1000;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: var(--sidebar-width);
+            height: 100vh;
+            background-color: var(--primary);
+            color: white;
+            padding: 1.25rem 1rem;
+            z-index: 1000;
         }
         .sidebar .nav-link {
-            color: #94a3b8; border-radius: 8px; margin-bottom: 6px; padding: 10px 14px;
-            display: flex; align-items: center; gap: 10px; font-weight: 500; transition: all 0.2s;
+            color: #94a3b8;
+            border-radius: 8px;
+            margin-bottom: 6px;
+            padding: 10px 14px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            font-weight: 500;
+            transition: all 0.2s;
         }
         .sidebar .nav-link:hover, .sidebar .nav-link.active {
-            background-color: var(--sidebar-hover); color: #f8fafc;
+            background-color: var(--sidebar-hover);
+            color: #f8fafc;
         }
-        .content { margin-left: var(--sidebar-width); padding: 24px; }
-        .topbar {
-            background: white; border-bottom: 1px solid #e2e8f0; padding: 12px 24px;
-            display: flex; justify-content: space-between; align-items: center;
-            position: sticky; top: 0; z-index: 999; margin: -24px -24px 24px -24px;
-        }
-        .status-indicator {
-            display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px;
-            border-radius: 9999px; font-weight: 700; font-size: 0.85rem; letter-spacing: 0.05em;
-        }
-        .status-safe { color: var(--success); background: #d1fae5; border: 1px solid #a7f3d0; }
-        .status-attack { color: var(--danger); background: #fee2e2; border: 1px solid #fca5a5; animation: pulse 1.5s infinite; }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
 
-        .kpi-card {
-            background: white; border-radius: 12px; padding: 20px;
-            border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.04);
+        /* --- Contenido Principal --- */
+        .content {
+            margin-left: var(--sidebar-width);
+            padding: 24px;
+            min-height: 100vh;
         }
-        .kpi-value { font-size: 1.9rem; font-weight: 700; margin: 4px 0; }
-        .kpi-label { color: #64748b; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; }
-        
+
+        /* --- Barra Superior --- */
+        .topbar {
+            background: white;
+            border-bottom: 1px solid #e2e8f0;
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 999;
+            margin: -24px -24px 24px -24px;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+        }
+
+        .status-indicator, .contenedor-estado {
+            display: inline-flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 14px;
+            border-radius: 9999px;
+            font-weight: 700;
+            font-size: 0.85rem;
+            letter-spacing: 0.04em;
+            transition: all 0.3s ease;
+        }
+        .status-safe {
+            color: #065f46;
+            background: #d1fae5;
+            border: 1px solid #a7f3d0;
+        }
+        .status-attack {
+            color: #991b1b;
+            background: #fee2e2;
+            border: 1px solid #fca5a5;
+            animation: latido-alerta 1.5s infinite;
+        }
+
+        .radar-pulso {
+            position: relative;
+            display: inline-block;
+            width: 9px;
+            height: 9px;
+            background-color: var(--success);
+            border-radius: 50%;
+        }
+        .status-attack .radar-pulso {
+            background-color: var(--danger);
+        }
+        .radar-pulso::after {
+            content: '';
+            position: absolute;
+            top: -4px;
+            left: -4px;
+            width: 17px;
+            height: 17px;
+            border: 2px solid var(--success);
+            border-radius: 50%;
+            animation: onda-radar 2s infinite ease-out;
+        }
+        .status-attack .radar-pulso::after {
+            border-color: var(--danger);
+            animation: onda-radar 1s infinite ease-out;
+        }
+
+        @keyframes onda-radar {
+            0% { transform: scale(0.5); opacity: 1; }
+            100% { transform: scale(1.7); opacity: 0; }
+        }
+        @keyframes latido-alerta {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.02); }
+        }
+
+        body.alerta-perimetral-activa {
+            box-shadow: inset 0 0 70px rgba(239, 68, 68, 0.45);
+            animation: latido-perimetro 1s infinite alternate ease-in-out;
+        }
+        @keyframes latido-perimetro {
+            0% { box-shadow: inset 0 0 30px rgba(239, 68, 68, 0.25); }
+            100% { box-shadow: inset 0 0 80px rgba(239, 68, 68, 0.55); }
+        }
+
+        /* --- Consola de Simulación --- */
+        .consola-simulacion {
+            background: #ffffff;
+            border: 1px solid #cbd5e1;
+            border-radius: 14px;
+            padding: 18px 22px;
+            margin-bottom: 24px;
+            box-shadow: 0 8px 20px -4px rgba(15, 23, 42, 0.08);
+        }
+        .tarjeta-accion-sim {
+            background: #f8fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 10px;
+            padding: 14px;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            transition: all 0.2s ease;
+        }
+        .tarjeta-accion-sim:hover {
+            background: #ffffff;
+            border-color: #cbd5e1;
+            box-shadow: 0 3px 10px rgba(0, 0, 0, 0.04);
+        }
+
+        /* --- Tarjetas KPI --- */
+        .kpi-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            height: 100%;
+        }
+        .kpi-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 18px -4px rgba(15, 23, 42, 0.08);
+            border-color: #cbd5e1;
+        }
+        .kpi-value {
+            font-size: 1.95rem;
+            font-weight: 700;
+            margin: 4px 0;
+            line-height: 1.15;
+        }
+        .kpi-label {
+            color: #64748b;
+            font-size: 0.78rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .icono-kpi {
+            width: 44px;
+            height: 44px;
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.35rem;
+            flex-shrink: 0;
+        }
+
+        /* --- Tarjetas de Gráficas y Tablas --- */
         .chart-card {
-            background: white; border-radius: 12px; padding: 20px;
-            border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.04); margin-bottom: 24px;
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            border: 1px solid #e2e8f0;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+            margin-bottom: 24px;
         }
         .table-container {
-            max-height: 280px; overflow-y: auto; border: 1px solid #e2e8f0; border-radius: 8px;
+            max-height: 290px;
+            overflow-y: auto;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
         }
-        table { font-size: 0.85rem; }
-        th { background: #f1f5f9; color: #475569; position: sticky; top: 0; z-index: 10; }
-        @media (max-width: 768px) {
-            .sidebar { width: 100%; height: auto; position: relative; }
-            .content { margin-left: 0; }
+        table {
+            font-size: 0.85rem;
+        }
+        th {
+            background: #f1f5f9;
+            color: #475569;
+            font-weight: 600;
+            position: sticky;
+            top: 0;
+            z-index: 10;
+            padding: 10px 14px !important;
+        }
+        td {
+            padding: 10px 14px !important;
+        }
+    </style>
+    <script>
+        (function () {
+            try {
+                var t = localStorage.getItem('cybershield_tema_visual');
+                if (t === 'gris') document.documentElement.classList.add('tema-gris');
+                else if (t === 'oscuro') document.documentElement.classList.add('tema-oscuro');
+            } catch (_) {}
+        })();
+    </script>
+    <style id="cybershield-anti-fouc">
+        html.tema-gris, html.tema-gris body { background-color: #cbd5e1 !important; color: #0f172a !important; }
+        html.tema-gris .topbar, html.tema-gris .kpi-card, html.tema-gris .chart-card, html.tema-gris .config-card,
+        html.tema-gris .card, html.tema-gris .card-body, html.tema-gris .table-container, html.tema-gris .table,
+        html.tema-gris tr, html.tema-gris td, html.tema-gris .consola-simulacion, html.tema-gris .tarjeta-accion-sim {
+            --bs-card-bg: #e2e8f0 !important; --bs-table-bg: #e2e8f0 !important;
+            background-color: #e2e8f0 !important; border-color: #94a3b8 !important; color: #0f172a !important;
+        }
+        html.tema-gris thead, html.tema-gris .table-light, html.tema-gris th {
+            background-color: #cbd5e1 !important; color: #0f172a !important; border-color: #94a3b8 !important;
+        }
+        html.tema-oscuro, html.tema-oscuro body { background-color: #0b1120 !important; color: #e2e8f0 !important; }
+        html.tema-oscuro .topbar, html.tema-oscuro .kpi-card, html.tema-oscuro .chart-card, html.tema-oscuro .config-card,
+        html.tema-oscuro .card, html.tema-oscuro .card-body, html.tema-oscuro .table-container, html.tema-oscuro .table,
+        html.tema-oscuro tr, html.tema-oscuro td, html.tema-oscuro .consola-simulacion, html.tema-oscuro .tarjeta-accion-sim {
+            --bs-card-bg: #1e293b !important; --bs-table-bg: #1e293b !important; --bs-table-color: #e2e8f0 !important;
+            background-color: #1e293b !important; border-color: #334155 !important; color: #f1f5f9 !important;
+        }
+        html.tema-oscuro thead, html.tema-oscuro .table-light, html.tema-oscuro th,
+        html.tema-oscuro .form-select, html.tema-oscuro .form-control, html.tema-oscuro .bg-light {
+            background-color: #0f172a !important; color: #cbd5e1 !important; border-color: #334155 !important;
+        }
+        html.tema-oscuro .text-dark, html.tema-oscuro h4, html.tema-oscuro h5, html.tema-oscuro h6, html.tema-oscuro .setting-label {
+            color: #f8fafc !important;
         }
     </style>
 </head>
 <body>
 
-    <!-- Sidebar -->
+    <!-- Barra Lateral -->
     <div class="sidebar d-flex flex-column">
         <div class="d-flex align-items-center mb-4 px-2">
             <i class="bi bi-shield-check fs-3 text-primary-emphasis me-2 text-info"></i>
@@ -77,7 +287,7 @@
         </div>
         <ul class="nav flex-column">
             <li class="nav-item">
-                <a class="nav-link" href="/frontend/"><i class="bi bi-speedometer2"></i> Monitor en Vivo</a>
+                <a class="nav-link active" href="/frontend/"><i class="bi bi-speedometer2"></i> Monitor en Vivo</a>
             </li>
             <li class="nav-item">
                 <a class="nav-link" href="/frontend/analisis.html"><i class="bi bi-graph-up"></i> Análisis Forense</a>
@@ -89,38 +299,117 @@
                 <a class="nav-link" href="/frontend/alertas.html"><i class="bi bi-exclamation-triangle"></i> Alertas</a>
             </li>
             <li class="nav-item">
+                <a class="nav-link" href="/frontend/configuracion.html"><i class="bi bi-gear"></i> Configuración</a>
+            </li>
+            <li class="nav-item">
                 <a class="nav-link" href="/docs" target="_blank"><i class="bi bi-code-slash"></i> API Swagger</a>
             </li>
         </ul>
         
         <div class="mt-auto p-2 bg-dark bg-opacity-25 rounded small text-secondary">
-            <div><i class="bi bi-cpu"></i> Modelo: Conv1D (CNN)</div>
+            <div><i class="bi bi-cpu"></i> NIDS: Conv1D (Capas 3 y 4)</div>
             <div><i class="bi bi-database"></i> Motor: SQLite/PostgreSQL</div>
         </div>
     </div>
 
     <!-- Contenido Principal -->
     <div class="content">
-        <!-- Topbar -->
+
+        <!-- Barra Superior -->
         <div class="topbar shadow-sm">
             <div class="d-flex align-items-center gap-3">
                 <span class="status-indicator status-safe" id="globalStatus">
-                    <span class="bi bi-circle-fill" style="font-size: 8px;"></span>
+                    <span class="radar-pulso"></span>
                     <span id="statusText">RED SEGURA</span>
                 </span>
                 <span class="text-muted small d-none d-md-inline" id="currentTime"></span>
             </div>
-            <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-outline-primary fw-semibold" onclick="simulateTraffic(false)">
-                    <i class="bi bi-play-fill"></i> Simular Benigno
-                </button>
-                <button class="btn btn-sm btn-outline-danger fw-semibold" onclick="simulateTraffic(true)">
-                    <i class="bi bi-exclamation-octagon"></i> Simular DDoS
+
+            <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-light text-secondary border px-3 py-2 rounded-pill d-none d-lg-inline">
+                    <i class="bi bi-broadcast text-success me-1"></i> WebSocket Conectado
+                </span>
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-danger fw-semibold px-3 py-2 rounded-pill dropdown-toggle d-flex align-items-center gap-2 shadow-sm" type="button" id="dropdownAlerta" data-bs-toggle="dropdown" aria-expanded="false" title="Configurar alarma audible">
+                        <i class="bi bi-megaphone-fill text-danger"></i> <span id="labelModoAlerta">Sirena Táctica + Voz</span>
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end shadow border-0 mt-2" aria-labelledby="dropdownAlerta" style="border-radius: 12px; font-size: 0.85rem; min-width: 240px;">
+                        <li><h6 class="dropdown-header text-uppercase text-secondary fw-bold" style="font-size: 0.70rem; letter-spacing: 0.05em;">Modo de Alarma Acústica</h6></li>
+                        <li><a class="dropdown-item active fw-medium py-2" href="javascript:void(0)" id="itemAlertaIntimidante" onclick="cambiarModoAlerta('intimidante')"><i class="bi bi-radioactive text-danger me-2 fs-6"></i>Sirena Táctica + Voz</a></li>
+                        <li><a class="dropdown-item fw-medium py-2" href="javascript:void(0)" id="itemAlertaRadar" onclick="cambiarModoAlerta('radar')"><i class="bi bi-radar text-primary me-2 fs-6"></i>Radar Cibernético</a></li>
+                        <li><hr class="dropdown-divider my-1"></li>
+                        <li><a class="dropdown-item text-secondary fw-medium py-2" href="javascript:void(0)" id="itemAlertaSilencio" onclick="cambiarModoAlerta('silencio')"><i class="bi bi-volume-mute-fill text-muted me-2 fs-6"></i>Silenciar Alarma</a></li>
+                    </ul>
+                </div>
+                <button id="btnConsolaSimulacion" class="btn btn-sm btn-primary fw-semibold px-3 py-2 rounded-pill d-flex align-items-center gap-2 shadow-sm" type="button" data-bs-toggle="collapse" data-bs-target="#panelSimulacion" aria-expanded="false" aria-controls="panelSimulacion">
+                    <i class="bi bi-sliders2-vertical"></i> Consola de Pruebas <i class="bi bi-chevron-down small"></i>
                 </button>
             </div>
         </div>
 
-<!-- KPIs Superiores con Iconos y Métricas Dinámicas -->
+        <!-- Consola de Simulación -->
+        <div class="collapse mb-4" id="panelSimulacion">
+            <div class="consola-simulacion">
+                <div class="d-flex justify-content-between align-items-center mb-3 pb-2 border-bottom">
+                    <div>
+                        <h6 class="fw-bold mb-0 text-dark"><i class="bi bi-tools text-primary me-2"></i>Consola Experimental de Inyección de Tráfico</h6>
+                        <small class="text-muted">Herramientas de demostración controlada para sustentar la detección temprana del modelo Conv1D.</small>
+                    </div>
+                    <span class="badge bg-primary-subtle text-primary border border-primary-subtle px-2 py-1 rounded-pill small">Entorno de Pruebas</span>
+                </div>
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <div class="tarjeta-accion-sim">
+                            <div>
+                                <div class="d-flex align-items-center gap-2 mb-1 text-success fw-bold">
+                                    <i class="bi bi-arrow-repeat fs-5"></i> Tráfico Continuo
+                                </div>
+                                <p class="small text-muted mb-3">Genera 3 a 7 flujos por segundo simulando actividad normal continua de la oficina.</p>
+                            </div>
+                            <button class="btn btn-sm btn-outline-success fw-semibold w-100 py-2 rounded-pill" id="btnAutoDemo" onclick="alternarModoDemostracion()">
+                                <i class="bi bi-play-circle-fill me-1"></i> Activar Tráfico Continuo
+                            </button>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="tarjeta-accion-sim">
+                            <div>
+                                <div class="d-flex align-items-center gap-2 mb-1 text-primary fw-bold">
+                                    <i class="bi bi-shield-check fs-5"></i> Ráfaga Benigna (+20)
+                                </div>
+                                <p class="small text-muted mb-3">Inyecta 20 flujos legítimos de red L3/L4 (TCP/UDP) para validar cero falsos positivos (HE1).</p>
+                            </div>
+                            <button class="btn btn-sm btn-outline-primary fw-semibold w-100 py-2 rounded-pill" onclick="simularTrafico(false, 20)">
+                                <i class="bi bi-send-check-fill me-1"></i> Inyectar Ráfaga Benigna
+                            </button>
+                        </div>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="tarjeta-accion-sim">
+                            <div>
+                                <div class="d-flex align-items-center gap-2 mb-1 text-danger fw-bold">
+                                    <i class="bi bi-radioactive fs-5"></i> Inyectar DDoS por Protocolo (+25)
+                                </div>
+                                <p class="small text-muted mb-2">Inyecta ataques L3/L4 diferenciados cromáticamente (TCP=Rojo, UDP=Naranja, ICMP=Púrpura).</p>
+                            </div>
+                            <div class="d-flex gap-1">
+                                <button class="btn btn-sm fw-semibold flex-fill py-2 rounded-pill text-white" style="background-color: #dc2626;" onclick="simularTrafico(true, 25, 'TCP')" title="Simular Ataque TCP SYN Flood (Alerta Roja)">
+                                    <i class="bi bi-exclamation-octagon-fill me-1"></i>TCP
+                                </button>
+                                <button class="btn btn-sm fw-semibold flex-fill py-2 rounded-pill text-white" style="background-color: #ea580c;" onclick="simularTrafico(true, 25, 'UDP')" title="Simular Ataque UDP Flood (Alerta Naranja)">
+                                    <i class="bi bi-lightning-charge-fill me-1"></i>UDP
+                                </button>
+                                <button class="btn btn-sm fw-semibold flex-fill py-2 rounded-pill text-white" style="background-color: #7c3aed;" onclick="simularTrafico(true, 25, 'ICMP')" title="Simular Ataque ICMP Ping Flood (Alerta Púrpura)">
+                                    <i class="bi bi-broadcast-pin me-1"></i>ICMP
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- KPIs -->
         <div class="row g-3 mb-4">
             <div class="col-md-6 col-xl-3">
                 <div class="kpi-card">
@@ -129,9 +418,11 @@
                             <div class="kpi-label">Flujos Analizados</div>
                             <div class="kpi-value text-dark" id="kpiTotal">0</div>
                         </div>
-                        <i class="bi bi-activity fs-3 text-primary"></i>
+                        <div class="icono-kpi" style="background: #eff6ff; color: #2563eb;">
+                            <i class="bi bi-activity"></i>
+                        </div>
                     </div>
-                    <div class="small text-muted"><i class="bi bi-clock-history"></i> Registrados en BD</div>
+                    <div class="small text-muted mt-2"><i class="bi bi-database-check text-primary me-1"></i>Registrados en BD</div>
                 </div>
             </div>
 
@@ -142,9 +433,13 @@
                             <div class="kpi-label">Ataques Detectados</div>
                             <div class="kpi-value text-danger" id="kpiDDoS">0</div>
                         </div>
-                        <i class="bi bi-shield-exclamation fs-3 text-danger"></i>
+                        <div class="icono-kpi" style="background: #fef2f2; color: #dc2626;">
+                            <i class="bi bi-shield-slash"></i>
+                        </div>
                     </div>
-                    <div class="small text-danger fw-semibold" id="lastDetectionTime">Última alerta: --:--:--</div>
+                    <div class="small text-danger fw-semibold mt-2" id="lastDetectionTime">
+                        <i class="bi bi-clock-history me-1"></i><span>Sin alertas recientes</span>
+                    </div>
                 </div>
             </div>
 
@@ -155,10 +450,16 @@
                             <div class="kpi-label">Tasa Falsos Positivos</div>
                             <div class="kpi-value text-success" id="kpiFPR">0.04%</div>
                         </div>
-                        <i class="bi bi-check-circle fs-3 text-success"></i>
+                        <div class="icono-kpi" style="background: #ecfdf5; color: #059669;">
+                            <i class="bi bi-check2-circle"></i>
+                        </div>
                     </div>
                     <div class="progress mt-2" style="height: 5px;">
                         <div class="progress-bar bg-success" id="fprBar" style="width: 4%;"></div>
+                    </div>
+                    <div class="d-flex justify-content-between align-items-center mt-2 small text-muted">
+                        <span>Meta: &lt; 1.0%</span>
+                        <span class="text-success fw-bold">Cumplida (HE1)</span>
                     </div>
                 </div>
             </div>
@@ -168,11 +469,13 @@
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
                             <div class="kpi-label">Precisión del Modelo</div>
-                            <div class="kpi-value text-info" id="kpiAccuracy">99.93%</div>
+                            <div class="kpi-value text-info" id="kpiAccuracy">99.92%</div>
                         </div>
-                        <i class="bi bi-cpu fs-3 text-info"></i>
+                        <div class="icono-kpi" style="background: #f0fdfa; color: #0d9488;">
+                            <i class="bi bi-cpu"></i>
+                        </div>
                     </div>
-                    <div class="small text-muted">Validado en CICIDS2017</div>
+                    <div class="small text-muted mt-2"><i class="bi bi-award text-info me-1"></i>Validado en CICIDS2017</div>
                 </div>
             </div>
         </div>
@@ -181,7 +484,7 @@
         <div class="row g-3 mb-4">
             <div class="col-lg-8">
                 <div class="chart-card">
-                    <h6 class="fw-bold mb-3 text-secondary"><i class="bi bi-activity"></i> Throughput de Tráfico de Red (Flujos / Segundo)</h6>
+                    <h6 class="fw-bold mb-3 text-secondary"><i class="bi bi-activity text-primary me-2"></i>Throughput de Tráfico de Red (Flujos / Segundo)</h6>
                     <div style="height: 240px;">
                         <canvas id="trafficChart"></canvas>
                     </div>
@@ -189,7 +492,7 @@
             </div>
             <div class="col-lg-4">
                 <div class="chart-card">
-                    <h6 class="fw-bold mb-3 text-secondary"><i class="bi bi-pie-chart"></i> Distribución Acumulada</h6>
+                    <h6 class="fw-bold mb-3 text-secondary"><i class="bi bi-pie-chart text-info me-2"></i>Distribución Acumulada</h6>
                     <div style="height: 240px;">
                         <canvas id="distributionChart"></canvas>
                     </div>
@@ -197,17 +500,17 @@
             </div>
         </div>
 
-        <!-- Tabla de Últimos Eventos Detectados -->
+        <!-- Tabla de Eventos en Tiempo Real -->
         <div class="chart-card">
             <div class="d-flex justify-content-between align-items-center mb-3">
-                <h6 class="fw-bold mb-0 text-secondary"><i class="bi bi-list-check"></i> Últimos Eventos Analizados en Vivo</h6>
-                <span class="badge bg-light text-dark border">Persistencia SQLite Activa</span>
+                <h6 class="fw-bold mb-0 text-secondary"><i class="bi bi-list-check text-primary me-2"></i>Últimos Eventos Analizados en Vivo</h6>
+                <span class="badge bg-light text-dark border"><i class="bi bi-shield-check text-success me-1"></i>Inspección L3/L4 Conv1D Activa</span>
             </div>
             <div class="table-container">
                 <table class="table table-hover align-middle mb-0">
                     <thead>
                         <tr>
-                            <th>Hora</th>
+                            <th>Hora Local</th>
                             <th>Protocolo</th>
                             <th>Clasificación CNN</th>
                             <th>Confianza</th>
@@ -219,8 +522,11 @@
                 </table>
             </div>
         </div>
+
     </div>
 
-    <script src="/frontend/js/app.js?v=2"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/frontend/js/alarma_global.js?v=14"></script>
+    <script src="/frontend/js/aplicacion.js?v=14"></script>
 </body>
 </html>
