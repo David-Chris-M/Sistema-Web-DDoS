@@ -545,14 +545,102 @@
                     </div>
                 </div>
 
+                <!-- 5. Módulo de Bloqueo Inteligente y Análisis SOAR -->
+                <div class="config-card border-info border-opacity-50">
+                    <div class="config-header">
+                        <div class="config-icon bg-warning-subtle text-warning">
+                            <i class="bi bi-shield-shaded"></i>
+                        </div>
+                        <div class="flex-grow-1">
+                            <div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
+                                <h6 class="fw-bold mb-0 text-dark">Módulo de Bloqueo Inteligente y Análisis SOAR</h6>
+                                <span class="badge bg-secondary-subtle text-secondary badge-value" id="badgeEstadoSoar">
+                                    <i class="bi bi-lock-fill me-1"></i> Desactivado (Aislado)
+                                </span>
+                            </div>
+                            <small class="text-muted">Investigación forense de 5 pasos y cuarentena IPS con Contraseña Maestra</small>
+                        </div>
+                    </div>
+
+                    <div class="setting-item">
+                        <div>
+                            <div class="setting-label">
+                                <i class="bi bi-key-fill text-warning me-1"></i> Activar Centro de Mitigación SOAR / IPS
+                            </div>
+                            <p class="setting-desc">
+                                Habilita la ventana exclusiva de respuesta automatizada (TTL RFC 4732, MAC/ARP LAN, ASN WAN, SANS ISC DShield y Firewall <code>netsh</code>). Al desactivarse, elimina todas las reglas <code>CyberShield_Block_*</code>.
+                            </p>
+                        </div>
+                        <div class="form-check form-switch ps-0">
+                            <input class="form-check-input ms-auto" type="checkbox" id="switchModuloSoar">
+                        </div>
+                    </div>
+
+                    <div id="panelAccesoRapidoSoar" class="d-none mt-3 mb-2">
+                        <a href="/frontend/soar.html" class="btn btn-sm btn-info text-white fw-bold w-100 rounded-pill py-2 shadow-sm">
+                            <i class="bi bi-box-arrow-up-right me-1"></i> Abrir Ventana Exclusiva: Centro de Mitigación SOAR
+                        </a>
+                    </div>
+
+                    <div class="bg-light p-3 rounded-3 mt-3 border">
+                        <div class="d-flex align-items-center gap-2 mb-2">
+                            <i class="bi bi-shield-check text-info"></i>
+                            <span class="fw-bold small text-dark">Los 4 Candados de Seguridad Obligatorios (NIST SP 800-94)</span>
+                        </div>
+                        <ul class="list-unstyled mb-0 small text-secondary">
+                            <li class="mb-1"><i class="bi bi-lock-fill text-primary me-1"></i> <strong>Candado 1 (Lista Inmutable):</strong> Protege IP del servidor, Router/Gateway, Loopback, DNS y CDNs (Cloudflare, Google, Zoom).</li>
+                            <li class="mb-1"><i class="bi bi-lock-fill text-primary me-1"></i> <strong>Candado 2 (Anti-Spoofing):</strong> Retiene autobloqueo si el Paso 1 detecta sospecha de IP Spoofing.</li>
+                            <li class="mb-1"><i class="bi bi-lock-fill text-primary me-1"></i> <strong>Candado 3 (TTL 15 min):</strong> Reglas con prefijo <code>CyberShield_Block_</code> y auto-expiración en 15 minutos.</li>
+                            <li><i class="bi bi-lock-fill text-primary me-1"></i> <strong>Candado 4 (Limpieza Total):</strong> Al desactivar este interruptor se purgan todas las reglas del Firewall y se libera la RAM.</li>
+                        </ul>
+                    </div>
+                </div>
+
             </div>
 
         </div>
 
     </div>
 
+    <!-- Modal de Contraseña Maestra SOAR -->
+    <div class="modal fade" id="modalClaveMaestraSoar" tabindex="-1" aria-hidden="true" data-bs-backdrop="static">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content border-0 shadow-lg rounded-4">
+                <div class="modal-header border-bottom-0 pb-0">
+                    <h6 class="modal-title fw-bold d-flex align-items-center gap-2" id="tituloModalSoar">
+                        <i class="bi bi-shield-lock-fill text-warning fs-5"></i>
+                        <span>Autorización de Seguridad — Contraseña Maestra</span>
+                    </h6>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar" id="btnCerrarModalSoar"></button>
+                </div>
+                <div class="modal-body pt-2">
+                    <p class="small text-secondary mb-3" id="descModalSoar">
+                        Ingrese la Contraseña Maestra del administrador para cambiar el estado del Módulo de Bloqueo Inteligente y Análisis SOAR.
+                    </p>
+                    <div class="mb-2">
+                        <label for="inputClaveMaestraSoar" class="form-label small fw-semibold">Contraseña Maestra</label>
+                        <div class="input-group">
+                            <span class="input-group-text"><i class="bi bi-key-fill"></i></span>
+                            <input type="password" class="form-control" id="inputClaveMaestraSoar" placeholder="Ingrese la Contraseña Maestra..." autocomplete="current-password">
+                        </div>
+                    </div>
+                    <div class="alert alert-danger py-2 px-3 small d-none mt-2 mb-0" id="alertaErrorClaveSoar">
+                        <i class="bi bi-exclamation-octagon-fill me-1"></i>
+                        <span id="textoErrorClaveSoar">Contraseña Maestra incorrecta</span>
+                    </div>
+                </div>
+                <div class="modal-footer border-top-0 pt-0">
+                    <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill px-3" data-bs-dismiss="modal" id="btnCancelarModalSoar">Cancelar</button>
+                    <button type="button" class="btn btn-sm btn-primary rounded-pill px-4 fw-semibold" id="btnConfirmarClaveSoar">
+                        <i class="bi bi-check2-shield me-1"></i> Validar y Aplicar
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/frontend/js/alarma_global.js?v=14"></script>
-    <script src="/frontend/js/configuracion.js?v=14"></script>
+    <script src="/frontend/js/alarma_global.js?v=15"></script>
+    <script src="/frontend/js/configuracion.js?v=15"></script>
 </body>
 </html>

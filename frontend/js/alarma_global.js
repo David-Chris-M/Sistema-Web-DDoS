@@ -912,6 +912,34 @@
         });
 
         const listaNav = document.querySelector('.sidebar ul.nav');
+        if (listaNav) {
+            const soarActivo = localStorage.getItem('cybershield_soar_activo') === 'true';
+            let itemSoar = document.getElementById('navItemCentroSoar');
+            if (soarActivo) {
+                if (!itemSoar) {
+                    itemSoar = document.createElement('li');
+                    itemSoar.className = 'nav-item';
+                    itemSoar.id = 'navItemCentroSoar';
+                    const esVistaSoar = window.location.pathname.endsWith('/soar.html');
+                    itemSoar.innerHTML = `
+                        <a class="nav-link ${esVistaSoar ? 'active' : ''}" href="/frontend/soar.html" style="border: 1px solid rgba(56, 189, 248, 0.35); background: rgba(14, 165, 233, 0.12);">
+                            <i class="bi bi-shield-shaded text-info"></i>
+                            <span>Centro Mitigación SOAR</span>
+                        </a>
+                    `;
+                    const enlaceConfig = listaNav.querySelector('a[href="/frontend/configuracion.html"]');
+                    const liConfig = enlaceConfig ? enlaceConfig.closest('li.nav-item') : null;
+                    if (liConfig) {
+                        listaNav.insertBefore(itemSoar, liConfig);
+                    } else {
+                        listaNav.appendChild(itemSoar);
+                    }
+                }
+            } else if (itemSoar) {
+                itemSoar.remove();
+            }
+        }
+
         if (listaNav && !document.getElementById('navItemCerrarSesion')) {
             const liLogout = document.createElement('li');
             liLogout.className = 'nav-item mt-2 pt-2 border-top border-secondary border-opacity-25';
@@ -932,10 +960,27 @@
         }
     }
 
+    async function sincronizarEstadoModuloSoar() {
+        try {
+            const resp = await fetch('/api/soar/status');
+            if (!resp.ok) return;
+            const datos = await resp.json();
+            const estadoReal = datos && datos.enabled === true ? 'true' : 'false';
+            if (localStorage.getItem('cybershield_soar_activo') !== estadoReal) {
+                localStorage.setItem('cybershield_soar_activo', estadoReal);
+                aplicarPreferenciasInterfaz();
+            }
+        } catch (_) {}
+    }
+
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', aplicarPreferenciasInterfaz);
+        document.addEventListener('DOMContentLoaded', () => {
+            aplicarPreferenciasInterfaz();
+            sincronizarEstadoModuloSoar();
+        });
     } else {
         aplicarPreferenciasInterfaz();
+        sincronizarEstadoModuloSoar();
     }
 
     // 11. Activación del Contexto de Audio
