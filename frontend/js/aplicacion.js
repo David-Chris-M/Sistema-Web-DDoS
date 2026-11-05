@@ -720,15 +720,16 @@ function crearElementoFilaTabla(elemento) {
         <td>
             <div class="d-flex align-items-center gap-1 flex-wrap">
                 <code class="small fw-semibold">${escaparHtml(ipOrig)}</code>
-                <span class="text-muted small">→</span>
-                <code class="small text-secondary">${escaparHtml(ipDest)}</code>
                 ${badgeAlcance}
             </div>
         </td>
+        <td><code class="small text-secondary">${escaparHtml(ipDest)}</code></td>
         <td><span class="badge bg-light text-dark border">${escaparHtml(proto)}</span></td>
         <td>${htmlClasificacion}</td>
-        <td>${escaparHtml(conf)}</td>
-        <td class="text-muted">${escaparHtml(prob)}</td>
+        <td>
+            <span class="fw-semibold">${escaparHtml(conf)}</span>
+            <span class="text-muted small ms-1">(p=${escaparHtml(prob)})</span>
+        </td>
         <td>${estadoNids}</td>
     `;
     return fila;
