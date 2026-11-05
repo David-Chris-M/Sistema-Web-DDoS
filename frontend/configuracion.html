@@ -572,7 +572,7 @@
                             </p>
                         </div>
                         <div class="form-check form-switch ps-0">
-                            <input class="form-check-input ms-auto" type="checkbox" id="switchModuloSoar">
+                            <input class="form-check-input ms-auto" type="checkbox" id="switchModuloSoar" onclick="if(window.solicitarAutorizacionSoar){return window.solicitarAutorizacionSoar(event);} return false;">
                         </div>
                     </div>
 
@@ -602,45 +602,41 @@
 
     </div>
 
-    <!-- Modal de Contraseña Maestra SOAR -->
-    <div class="modal fade" id="modalClaveMaestraSoar" tabindex="-1" aria-hidden="true" data-bs-backdrop="static">
-        <div class="modal-dialog modal-dialog-centered">
-            <div class="modal-content border-0 shadow-lg rounded-4">
-                <div class="modal-header border-bottom-0 pb-0">
-                    <h6 class="modal-title fw-bold d-flex align-items-center gap-2" id="tituloModalSoar">
-                        <i class="bi bi-shield-lock-fill text-warning fs-5"></i>
-                        <span>Autorización de Seguridad — Contraseña Maestra</span>
-                    </h6>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar" id="btnCerrarModalSoar"></button>
+    <!-- Modal Propio de Contraseña Maestra SOAR (Sin dependencia externa) -->
+    <div id="modalClaveMaestraSoar" class="d-none" style="position: fixed; inset: 0; background: rgba(15, 23, 42, 0.72); backdrop-filter: blur(4px); z-index: 105000; display: flex; align-items: center; justify-content: center; padding: 16px;">
+        <div class="modal-content border-0 shadow-lg rounded-4 p-4" style="max-width: 460px; width: 100%; background: #ffffff; color: #0f172a;">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <h6 class="fw-bold mb-0 d-flex align-items-center gap-2" id="tituloModalSoar">
+                    <i class="bi bi-shield-lock-fill text-warning fs-5"></i>
+                    <span>Autorización — Contraseña Maestra</span>
+                </h6>
+                <button type="button" class="btn-close" aria-label="Cerrar" id="btnCerrarModalSoar"></button>
+            </div>
+            <p class="small text-secondary mb-3" id="descModalSoar">
+                Ingrese la Contraseña Maestra del administrador para cambiar el estado del Módulo de Bloqueo Inteligente y Análisis SOAR.
+            </p>
+            <div class="mb-2">
+                <label for="inputClaveMaestraSoar" class="form-label small fw-semibold">Contraseña Maestra</label>
+                <div class="input-group">
+                    <span class="input-group-text"><i class="bi bi-key-fill"></i></span>
+                    <input type="password" class="form-control" id="inputClaveMaestraSoar" placeholder="Ingrese la Contraseña Maestra..." autocomplete="current-password">
                 </div>
-                <div class="modal-body pt-2">
-                    <p class="small text-secondary mb-3" id="descModalSoar">
-                        Ingrese la Contraseña Maestra del administrador para cambiar el estado del Módulo de Bloqueo Inteligente y Análisis SOAR.
-                    </p>
-                    <div class="mb-2">
-                        <label for="inputClaveMaestraSoar" class="form-label small fw-semibold">Contraseña Maestra</label>
-                        <div class="input-group">
-                            <span class="input-group-text"><i class="bi bi-key-fill"></i></span>
-                            <input type="password" class="form-control" id="inputClaveMaestraSoar" placeholder="Ingrese la Contraseña Maestra..." autocomplete="current-password">
-                        </div>
-                    </div>
-                    <div class="alert alert-danger py-2 px-3 small d-none mt-2 mb-0" id="alertaErrorClaveSoar">
-                        <i class="bi bi-exclamation-octagon-fill me-1"></i>
-                        <span id="textoErrorClaveSoar">Contraseña Maestra incorrecta</span>
-                    </div>
-                </div>
-                <div class="modal-footer border-top-0 pt-0">
-                    <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill px-3" data-bs-dismiss="modal" id="btnCancelarModalSoar">Cancelar</button>
-                    <button type="button" class="btn btn-sm btn-primary rounded-pill px-4 fw-semibold" id="btnConfirmarClaveSoar">
-                        <i class="bi bi-check2-shield me-1"></i> Validar y Aplicar
-                    </button>
-                </div>
+            </div>
+            <div class="alert alert-danger py-2 px-3 small d-none mt-2 mb-0" id="alertaErrorClaveSoar">
+                <i class="bi bi-exclamation-octagon-fill me-1"></i>
+                <span id="textoErrorClaveSoar">Contraseña Maestra incorrecta</span>
+            </div>
+            <div class="d-flex justify-content-end gap-2 mt-3 pt-2">
+                <button type="button" class="btn btn-sm btn-outline-secondary rounded-pill px-3" id="btnCancelarModalSoar">Cancelar</button>
+                <button type="button" class="btn btn-sm btn-primary rounded-pill px-4 fw-semibold" id="btnConfirmarClaveSoar">
+                    <i class="bi bi-check2-shield me-1"></i> Validar y Aplicar
+                </button>
             </div>
         </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/frontend/js/alarma_global.js?v=15"></script>
-    <script src="/frontend/js/configuracion.js?v=15"></script>
+    <script src="/frontend/js/alarma_global.js?v=16"></script>
+    <script src="/frontend/js/configuracion.js?v=16"></script>
 </body>
 </html>

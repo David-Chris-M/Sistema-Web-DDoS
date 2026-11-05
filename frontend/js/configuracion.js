@@ -464,15 +464,34 @@
     const alertaErrorClaveSoar = document.getElementById('alertaErrorClaveSoar');
     const textoErrorClaveSoar = document.getElementById('textoErrorClaveSoar');
     const btnConfirmarClaveSoar = document.getElementById('btnConfirmarClaveSoar');
+    const btnCancelarModalSoar = document.getElementById('btnCancelarModalSoar');
+    const btnCerrarModalSoar = document.getElementById('btnCerrarModalSoar');
     const descModalSoar = document.getElementById('descModalSoar');
 
-    let instanciaModalSoar = null;
+    let estadoConfirmadoSoar = false;
     let estadoObjetivoSoar = false;
 
+    function abrirModalSoar() {
+        if (!modalElSoar) return;
+        modalElSoar.classList.remove('d-none');
+        if (alertaErrorClaveSoar) alertaErrorClaveSoar.classList.add('d-none');
+        if (inputClaveMaestraSoar) {
+            inputClaveMaestraSoar.value = '';
+            setTimeout(() => inputClaveMaestraSoar.focus(), 60);
+        }
+    }
+
+    function cerrarModalSoar() {
+        if (!modalElSoar) return;
+        modalElSoar.classList.add('d-none');
+        if (switchModuloSoar) switchModuloSoar.checked = estadoConfirmadoSoar;
+    }
+
     function reflejarEstadoVisualSoar(activo) {
-        if (switchModuloSoar) switchModuloSoar.checked = !!activo;
+        estadoConfirmadoSoar = Boolean(activo);
+        if (switchModuloSoar) switchModuloSoar.checked = estadoConfirmadoSoar;
         if (badgeEstadoSoar) {
-            if (activo) {
+            if (estadoConfirmadoSoar) {
                 badgeEstadoSoar.className = 'badge bg-success-subtle text-success badge-value';
                 badgeEstadoSoar.innerHTML = '<i class="bi bi-shield-fill-check me-1"></i> Activo (SOAR + IPS)';
             } else {
@@ -481,97 +500,113 @@
             }
         }
         if (panelAccesoRapidoSoar) {
-            if (activo) {
+            if (estadoConfirmadoSoar) {
                 panelAccesoRapidoSoar.classList.remove('d-none');
             } else {
                 panelAccesoRapidoSoar.classList.add('d-none');
             }
         }
-        localStorage.setItem('cybershield_soar_activo', activo ? 'true' : 'false');
+        localStorage.setItem('cybershield_soar_activo', estadoConfirmadoSoar ? 'true' : 'false');
         if (typeof window.aplicarPreferenciasInterfaz === 'function') {
             window.aplicarPreferenciasInterfaz();
         }
     }
 
+    window.solicitarAutorizacionSoar = function (evento) {
+        if (evento) {
+            evento.preventDefault();
+            evento.stopPropagation();
+        }
+        estadoObjetivoSoar = !estadoConfirmadoSoar;
+        if (switchModuloSoar) switchModuloSoar.checked = estadoConfirmadoSoar;
+
+        if (descModalSoar) {
+            descModalSoar.textContent = estadoObjetivoSoar
+                ? 'Ingrese la Contraseña Maestra para ACTIVAR el Módulo de Investigación SOAR y habilitar el Centro de Mitigación en el menú.'
+                : 'Ingrese la Contraseña Maestra para DESACTIVAR el Módulo SOAR. El Candado 4 eliminará automáticamente todas las reglas CyberShield_Block_* del Firewall.';
+        }
+        abrirModalSoar();
+        return false;
+    };
+
     async function cargarEstadoInicialSoar() {
         try {
             const resp = await fetch('/api/soar/status');
-            if (!resp.ok) return;
+            if (!resp.ok) {
+                reflejarEstadoVisualSoar(false);
+                return;
+            }
             const datos = await resp.json();
             reflejarEstadoVisualSoar(Boolean(datos && datos.enabled));
-        } catch (_) {}
+        } catch (_) {
+            reflejarEstadoVisualSoar(false);
+        }
     }
 
-    if (switchModuloSoar && modalElSoar && typeof bootstrap !== 'undefined') {
-        instanciaModalSoar = new bootstrap.Modal(modalElSoar);
+    async function enviarValidacionClaveMaestra() {
+        const clave = (inputClaveMaestraSoar ? inputClaveMaestraSoar.value : '').trim();
+        if (!clave) {
+            if (textoErrorClaveSoar) textoErrorClaveSoar.textContent = 'Debe ingresar la Contraseña Maestra';
+            if (alertaErrorClaveSoar) alertaErrorClaveSoar.classList.remove('d-none');
+            return;
+        }
 
-        switchModuloSoar.addEventListener('change', (e) => {
-            estadoObjetivoSoar = e.target.checked;
-            // Revertir visualmente hasta validar la Contraseña Maestra en el backend
-            e.target.checked = !estadoObjetivoSoar;
-
-            if (alertaErrorClaveSoar) alertaErrorClaveSoar.classList.add('d-none');
-            if (inputClaveMaestraSoar) inputClaveMaestraSoar.value = '';
-            if (descModalSoar) {
-                descModalSoar.textContent = estadoObjetivoSoar
-                    ? 'Ingrese la Contraseña Maestra para ACTIVAR el Módulo de Investigación SOAR y habilitar el Centro de Mitigación en el menú.'
-                    : 'Ingrese la Contraseña Maestra para DESACTIVAR el Módulo SOAR. El Candado 4 eliminará automáticamente todas las reglas CyberShield_Block_* del Firewall.';
-            }
-            instanciaModalSoar.show();
-            setTimeout(() => {
-                if (inputClaveMaestraSoar) inputClaveMaestraSoar.focus();
-            }, 220);
-        });
-
-        async function enviarValidacionClaveMaestra() {
-            const clave = (inputClaveMaestraSoar ? inputClaveMaestraSoar.value : '').trim();
-            if (!clave) {
-                if (textoErrorClaveSoar) textoErrorClaveSoar.textContent = 'Debe ingresar la Contraseña Maestra';
+        if (btnConfirmarClaveSoar) btnConfirmarClaveSoar.disabled = true;
+        try {
+            const resp = await fetch('/api/soar/toggle', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    enabled: estadoObjetivoSoar,
+                    master_password: clave
+                })
+            });
+            const datos = await resp.json().catch(() => ({}));
+            if (!resp.ok) {
+                if (textoErrorClaveSoar) {
+                    textoErrorClaveSoar.textContent = datos.detail || 'Contraseña Maestra incorrecta';
+                }
                 if (alertaErrorClaveSoar) alertaErrorClaveSoar.classList.remove('d-none');
+                if (switchModuloSoar) switchModuloSoar.checked = estadoConfirmadoSoar;
                 return;
             }
 
-            if (btnConfirmarClaveSoar) btnConfirmarClaveSoar.disabled = true;
-            try {
-                const resp = await fetch('/api/soar/toggle', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        enabled: estadoObjetivoSoar,
-                        master_password: clave
-                    })
-                });
-                const datos = await resp.json().catch(() => ({}));
-                if (!resp.ok) {
-                    if (textoErrorClaveSoar) {
-                        textoErrorClaveSoar.textContent = datos.detail || 'Contraseña Maestra incorrecta';
-                    }
-                    if (alertaErrorClaveSoar) alertaErrorClaveSoar.classList.remove('d-none');
-                    return;
-                }
+            cerrarModalSoar();
+            reflejarEstadoVisualSoar(Boolean(datos.enabled));
+            mostrarToastGuardado(datos.message || (datos.enabled ? 'Módulo SOAR activado' : 'Módulo SOAR desactivado y Firewall limpio'));
+        } catch (err) {
+            if (textoErrorClaveSoar) textoErrorClaveSoar.textContent = 'Error de conexión con el servidor';
+            if (alertaErrorClaveSoar) alertaErrorClaveSoar.classList.remove('d-none');
+            if (switchModuloSoar) switchModuloSoar.checked = estadoConfirmadoSoar;
+        } finally {
+            if (btnConfirmarClaveSoar) btnConfirmarClaveSoar.disabled = false;
+        }
+    }
 
-                instanciaModalSoar.hide();
-                reflejarEstadoVisualSoar(Boolean(datos.enabled));
-                mostrarToastGuardado(datos.message || (datos.enabled ? 'Módulo SOAR activado' : 'Módulo SOAR desactivado y Firewall limpio'));
-            } catch (err) {
-                if (textoErrorClaveSoar) textoErrorClaveSoar.textContent = 'Error de conexión con el servidor';
-                if (alertaErrorClaveSoar) alertaErrorClaveSoar.classList.remove('d-none');
-            } finally {
-                if (btnConfirmarClaveSoar) btnConfirmarClaveSoar.disabled = false;
+    if (switchModuloSoar) {
+        switchModuloSoar.addEventListener('change', (e) => {
+            e.preventDefault();
+            switchModuloSoar.checked = estadoConfirmadoSoar;
+        });
+    }
+    if (btnConfirmarClaveSoar) {
+        btnConfirmarClaveSoar.addEventListener('click', enviarValidacionClaveMaestra);
+    }
+    if (btnCancelarModalSoar) {
+        btnCancelarModalSoar.addEventListener('click', cerrarModalSoar);
+    }
+    if (btnCerrarModalSoar) {
+        btnCerrarModalSoar.addEventListener('click', cerrarModalSoar);
+    }
+    if (inputClaveMaestraSoar) {
+        inputClaveMaestraSoar.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                enviarValidacionClaveMaestra();
+            } else if (e.key === 'Escape') {
+                cerrarModalSoar();
             }
-        }
-
-        if (btnConfirmarClaveSoar) {
-            btnConfirmarClaveSoar.addEventListener('click', enviarValidacionClaveMaestra);
-        }
-        if (inputClaveMaestraSoar) {
-            inputClaveMaestraSoar.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') {
-                    e.preventDefault();
-                    enviarValidacionClaveMaestra();
-                }
-            });
-        }
+        });
     }
 
     cargarConfiguraciones();
