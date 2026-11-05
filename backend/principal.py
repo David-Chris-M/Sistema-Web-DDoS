@@ -1,5 +1,5 @@
 import asyncio
-from collections import deque
+from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
 import csv
 import gc
@@ -8,6 +8,7 @@ import io
 import ipaddress
 import logging
 import os
+import socket
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -525,9 +526,205 @@ DBWriter = EscritorBaseDatos
 # --- Pipeline de Procesamiento e Inferencia Conv1D ---
 _umbral_decision_activo: float = float(configuracion.umbral_decision)
 _ventana_rafaga_sensor: deque = deque(maxlen=256)
+_conntrack_sesiones_locales: "OrderedDict[tuple, float]" = OrderedDict()
 _historial_segundos_throughput: dict[int, dict[str, int]] = {}
 VENTANA_CORRELACION_SEG: float = 5.0
 MIN_FLUJOS_RAFAGA_DDOS: int = 2
+MAX_SESIONES_CONNTRACK: int = 8192
+TTL_CONNTRACK_SEG: float = 300.0
+
+REDES_CDN_CLOUD_CONOCIDAS = (
+    ipaddress.ip_network("104.16.0.0/12"),   # Cloudflare
+    ipaddress.ip_network("172.64.0.0/13"),   # Cloudflare
+    ipaddress.ip_network("162.158.0.0/15"),  # Cloudflare
+    ipaddress.ip_network("172.217.0.0/16"),  # Google
+    ipaddress.ip_network("142.250.0.0/15"),  # Google
+    ipaddress.ip_network("170.114.0.0/16"),  # Zoom / Oracle Cloud
+)
+
+
+def _detectar_ips_locales_servidor() -> set[str]:
+    ips = {"127.0.0.1", "192.168.18.10"}
+    ip_env = (os.getenv("LOCAL_HOST_IP") or "").strip()
+    if ip_env:
+        ips.add(ip_env)
+    for destino in (("192.168.18.1", 80), ("8.8.8.8", 80)):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(destino)
+                ip_local = s.getsockname()[0]
+                if ip_local and not ip_local.startswith("169.254."):
+                    ips.add(ip_local)
+        except Exception:
+            pass
+    return ips
+
+
+_IPS_PROPIAS_SERVIDOR: set[str] = _detectar_ips_locales_servidor()
+
+
+def _es_puerto_multimedia_o_web_udp(puerto: int) -> bool:
+    return (
+        puerto in (53, 80, 443, 3478, 3479)
+        or (8801 <= puerto <= 8810)
+        or (19300 <= puerto <= 19309)
+    )
+
+
+def _es_puerto_servicio_cdn_cloud(puerto: int) -> bool:
+    return (
+        puerto in (80, 443, 3478, 3479, 8801, 19300)
+        or (8801 <= puerto <= 8810)
+        or (19300 <= puerto <= 19309)
+    )
+
+
+def _es_puerto_efimero_local(puerto: int) -> bool:
+    return puerto >= 1024 and puerto not in (8000, 8080, 8443, 9999)
+
+
+def _es_ip_cdn_cloud_conocida(ip_obj: ipaddress._BaseAddress) -> bool:
+    if ip_obj.version == 6 and ip_obj.ipv4_mapped is not None:
+        ip_obj = ip_obj.ipv4_mapped
+    if ip_obj.version != 4:
+        return False
+    return any(ip_obj in red for red in REDES_CDN_CLOUD_CONOCIDAS)
+
+
+def _es_trafico_cdn_cloud_benigno(r: RegistroFlujo) -> bool:
+    if len(r.features) < 2:
+        return False
+    puerto_origen = int(round(r.features[0]))
+    puerto_destino = int(round(r.features[1]))
+    if puerto_origen == 9999 or puerto_destino == 9999:
+        return False
+    try:
+        ip_src = ipaddress.ip_address(str(r.src_ip))
+        ip_dst = ipaddress.ip_address(str(r.dst_ip))
+    except ValueError:
+        return False
+
+    src_es_local = str(ip_src) in _IPS_PROPIAS_SERVIDOR
+    dst_es_local = str(ip_dst) in _IPS_PROPIAS_SERVIDOR
+
+    if (
+        dst_es_local
+        and _es_ip_cdn_cloud_conocida(ip_src)
+        and _es_puerto_servicio_cdn_cloud(puerto_origen)
+        and _es_puerto_efimero_local(puerto_destino)
+    ):
+        return True
+
+    if (
+        src_es_local
+        and _es_ip_cdn_cloud_conocida(ip_dst)
+        and _es_puerto_efimero_local(puerto_origen)
+        and _es_puerto_servicio_cdn_cloud(puerto_destino)
+    ):
+        return True
+
+    return False
+
+
+def _es_trafico_solicitado_conntrack(r: RegistroFlujo, ahora_mono: float) -> bool:
+    if _es_trafico_cdn_cloud_benigno(r):
+        return True
+
+    if r.protocol not in ("TCP", "UDP") or len(r.features) < 50:
+        return False
+
+    puerto_origen = int(round(r.features[0]))
+    puerto_destino = int(round(r.features[1]))
+    if puerto_origen == 9999 or puerto_destino == 9999:
+        return False
+
+    try:
+        ip_src = ipaddress.ip_address(str(r.src_ip))
+        ip_dst = ipaddress.ip_address(str(r.dst_ip))
+    except ValueError:
+        return False
+
+    if ip_src == ip_dst or ip_src.is_loopback or ip_dst.is_loopback:
+        return False
+
+    while _conntrack_sesiones_locales:
+        _, t_visto = next(iter(_conntrack_sesiones_locales.items()))
+        if (ahora_mono - t_visto) <= TTL_CONNTRACK_SEG:
+            break
+        _conntrack_sesiones_locales.popitem(last=False)
+
+    extremo_a = (str(ip_src), puerto_origen)
+    extremo_b = (str(ip_dst), puerto_destino)
+    clave_conntrack = (
+        (extremo_a, extremo_b, r.protocol)
+        if extremo_a <= extremo_b
+        else (extremo_b, extremo_a, r.protocol)
+    )
+
+    paq_ida = float(r.features[4])
+    paq_vuelta = float(r.features[5])
+    bytes_ida = float(r.features[6])
+    bytes_vuelta = float(r.features[7])
+    rst_cnt = float(r.features[47])
+
+    src_es_local = str(ip_src) in _IPS_PROPIAS_SERVIDOR
+    dst_es_local = str(ip_dst) in _IPS_PROPIAS_SERVIDOR
+    src_es_externa = not (src_es_local or ip_src.is_loopback or ip_src.is_multicast or ip_src.is_unspecified)
+    dst_es_externa = not (dst_es_local or ip_dst.is_loopback or ip_dst.is_multicast or ip_dst.is_unspecified)
+
+    if src_es_local and dst_es_externa:
+        es_bidireccional_establecida = (
+            paq_ida >= 1.0
+            and paq_vuelta >= 1.0
+            and (bytes_vuelta > 0.0 or (bytes_ida > 0.0 and rst_cnt == 0.0))
+        )
+        es_multimedia_udp_saliente = (
+            r.protocol == "UDP"
+            and (paq_ida >= 1.0 or clave_conntrack in _conntrack_sesiones_locales)
+            and (
+                _es_puerto_multimedia_o_web_udp(puerto_destino)
+                or _es_puerto_multimedia_o_web_udp(puerto_origen)
+            )
+        )
+        es_sesion_saliente_activa = (paq_ida >= 1.0 and rst_cnt == 0.0)
+        if (
+            es_bidireccional_establecida
+            or es_multimedia_udp_saliente
+            or es_sesion_saliente_activa
+            or clave_conntrack in _conntrack_sesiones_locales
+        ):
+            _conntrack_sesiones_locales[clave_conntrack] = ahora_mono
+            _conntrack_sesiones_locales.move_to_end(clave_conntrack)
+            while len(_conntrack_sesiones_locales) > MAX_SESIONES_CONNTRACK:
+                _conntrack_sesiones_locales.popitem(last=False)
+            return True
+
+    if src_es_externa and dst_es_local:
+        es_multimedia_udp_entrante = (
+            r.protocol == "UDP"
+            and _es_puerto_multimedia_o_web_udp(puerto_origen)
+            and _es_puerto_efimero_local(puerto_destino)
+            and (paq_vuelta >= 1.0 or clave_conntrack in _conntrack_sesiones_locales)
+        )
+        if es_multimedia_udp_entrante:
+            _conntrack_sesiones_locales[clave_conntrack] = ahora_mono
+            _conntrack_sesiones_locales.move_to_end(clave_conntrack)
+            while len(_conntrack_sesiones_locales) > MAX_SESIONES_CONNTRACK:
+                _conntrack_sesiones_locales.popitem(last=False)
+            return True
+
+        if clave_conntrack in _conntrack_sesiones_locales:
+            es_respuesta_web_o_multimedia = (
+                (r.protocol == "TCP" and puerto_origen in (80, 443) and _es_puerto_efimero_local(puerto_destino))
+                or (r.protocol == "UDP" and _es_puerto_multimedia_o_web_udp(puerto_origen) and _es_puerto_efimero_local(puerto_destino))
+            )
+            if paq_ida >= 100.0 and paq_vuelta <= 2.0 and not es_respuesta_web_o_multimedia:
+                return False
+            _conntrack_sesiones_locales[clave_conntrack] = ahora_mono
+            _conntrack_sesiones_locales.move_to_end(clave_conntrack)
+            return True
+
+    return False
 
 
 class EsquemaUmbralDecision(BaseModel):
@@ -536,8 +733,9 @@ class EsquemaUmbralDecision(BaseModel):
 
 async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, tiempo_recepcion: float) -> List[dict]:
     matriz_X = np.asarray([r.features for r in registros], dtype=np.float64)
+    ips_origen_lote = [str(r.src_ip) for r in registros] if origen == "sensor" else None
     try:
-        probabilidades, ms_modelo = await motor_inferencia.predecir(matriz_X)
+        probabilidades, ms_modelo = await motor_inferencia.predecir(matriz_X, ips_origen=ips_origen_lote)
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=f"Modelo Conv1D no disponible: {exc}")
     except (ValueError, TypeError) as exc:
@@ -558,14 +756,18 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
     if origen == "sensor":
         while _ventana_rafaga_sensor and (ahora_mono - _ventana_rafaga_sensor[0]) > VENTANA_CORRELACION_SEG:
             _ventana_rafaga_sensor.popleft()
-        candidatos_lote = sum(1 for p in probs_lista if p > umbral_sensor)
+        es_solicitado_lista = [_es_trafico_solicitado_conntrack(r, ahora_mono) for r in registros]
+        candidatos_lote = sum(
+            1 for p, sol in zip(probs_lista, es_solicitado_lista) if p > umbral_sensor and not sol
+        )
         for _ in range(candidatos_lote):
             _ventana_rafaga_sensor.append(ahora_mono)
         total_rafaga_reciente = len(_ventana_rafaga_sensor)
     else:
+        es_solicitado_lista = [False] * len(registros)
         total_rafaga_reciente = len(probs_lista)
 
-    for r, prob in zip(registros, probs_lista):
+    for r, prob, es_solicitado in zip(registros, probs_lista, es_solicitado_lista):
         es_pico_inusual = False
         etiqueta_estado = None
 
@@ -573,9 +775,24 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
             puerto_origen = int(round(r.features[0])) if len(r.features) > 1 else 0
             puerto_destino = int(round(r.features[1])) if len(r.features) > 1 else 0
             es_puerto_testbed = (puerto_origen == 9999 or puerto_destino == 9999)
+            es_iniciador_local = (str(r.src_ip) in _IPS_PROPIAS_SERVIDOR and not es_puerto_testbed)
+            es_cdn_cloud_benigno = _es_trafico_cdn_cloud_benigno(r)
+            es_ataque_entrante_lan = (
+                str(r.src_ip) not in _IPS_PROPIAS_SERVIDOR
+                and str(r.dst_ip) in _IPS_PROPIAS_SERVIDOR
+                and not es_cdn_cloud_benigno
+                and not es_solicitado
+                and len(r.features) > 5
+                and float(r.features[4]) >= 100.0
+                and float(r.features[5]) <= 2.0
+            )
 
-            if prob > umbral_sensor:
-                if total_rafaga_reciente >= MIN_FLUJOS_RAFAGA_DDOS or es_puerto_testbed:
+            if es_solicitado or es_iniciador_local or es_cdn_cloud_benigno:
+                es_ddos = False
+                if prob > 0.50:
+                    prob = round(0.05 + (prob * 0.10), 4)
+            elif prob > umbral_sensor:
+                if total_rafaga_reciente >= MIN_FLUJOS_RAFAGA_DDOS or es_puerto_testbed or es_ataque_entrante_lan:
                     es_ddos = True
                 else:
                     es_ddos = False

@@ -13,6 +13,7 @@ from backend.base_datos import motor_bd
 from backend.configuracion import configuracion
 from backend.inferencia import TOTAL_CANONICAS
 from backend.principal import aplicacion
+from sensor.capturador_trafico_vivo import TablaFlujos
 
 N_CANONICO = TOTAL_CANONICAS
 
@@ -161,6 +162,76 @@ def ejecutar_auditoria_produccion() -> bool:
             "Pool de 15 Conexiones Intacto y Memoria RAM Optimizada",
             tamano_pool == 15 and r_ram_post < 500.0,
             f"Pool: {tamano_pool} conexiones | RAM tras simulaciones: {r_ram_post} MB",
+        )
+
+        tabla_pin = TablaFlujos()
+        t_base = 1000.0
+        for i in range(810):
+            t_pkt = t_base + (i * 0.001)
+            if i % 10 == 1:
+                tabla_pin._ingestar_campos_flujo(
+                    t_pkt, "192.168.18.10", 54321, "172.217.115.4", 443, 6, "TCP", 0, 0x10, 20, 64240
+                )
+            else:
+                tabla_pin._ingestar_campos_flujo(
+                    t_pkt, "172.217.115.4", 443, "192.168.18.10", 54321, 6, "TCP", 12000, 0x18, 20, 65535
+                )
+        # Simular pausa de 3s (> 2s idle) y luego ráfaga pura de 400 paquetes del servidor en 4ms (0 paq locales en sub-ventana)
+        tabla_pin.expirar_inactivos(t_base + 4.0, forzar_todos=False)
+        for i in range(400):
+            t_pkt = t_base + 4.5 + (i * 0.00001)
+            tabla_pin._ingestar_campos_flujo(
+                t_pkt, "172.217.115.4", 443, "192.168.18.10", 54321, 6, "TCP", 1350, 0x18, 20, 65535
+            )
+        # Simular videollamada Zoom UDP 8801 (170.114.76.41) y WebRTC UDP 19300 (104.29.143.47)
+        tabla_pin._ingestar_campos_flujo(
+            t_base + 5.0, "192.168.18.10", 50768, "170.114.76.41", 8801, 17, "UDP", 120, 0, 20, -1
+        )
+        for i in range(399):
+            tabla_pin._ingestar_campos_flujo(
+                t_base + 5.01 + (i * 0.001), "170.114.76.41", 8801, "192.168.18.10", 50768, 17, "UDP", 1100, 0, 20, -1
+            )
+        tabla_pin._ingestar_campos_flujo(
+            t_base + 6.0, "192.168.18.10", 49915, "104.29.143.47", 19300, 17, "UDP", 90, 0, 20, -1
+        )
+        for i in range(399):
+            tabla_pin._ingestar_campos_flujo(
+                t_base + 6.01 + (i * 0.001), "104.29.143.47", 19300, "192.168.18.10", 49915, 17, "UDP", 950, 0, 20, -1
+            )
+
+        tabla_pin.expirar_inactivos(t_base + 15.0, forzar_todos=True)
+        regs_descarga = tabla_pin.extraer_registros()
+        pinning_descarga_ok = (
+            len(regs_descarga) == 6
+            and all(r["src_ip"] == "192.168.18.10" for r in regs_descarga)
+        )
+        r_lote_descarga = cliente.post("/api/predict/batch", json={"records": regs_descarga}, headers=cabeceras)
+        conntrack_descarga_ok = r_lote_descarga.status_code == 200 and r_lote_descarga.json().get("ddos") == 0
+
+        for puerto_dst in (80, 8080):
+            for i in range(400):
+                t_pkt = t_base + 20.0 + (i * 0.00002)
+                tabla_pin._ingestar_campos_flujo(
+                    t_pkt, "203.0.113.88", 443, "192.168.18.10", puerto_dst, 6, "TCP", 11500, 0x18, 20, 512
+                )
+        regs_flood = tabla_pin.extraer_registros()
+        reversion_midstream_ok = (
+            len(regs_flood) == 2
+            and all(
+                r["src_ip"] == "203.0.113.88"
+                and r["dst_ip"] == "192.168.18.10"
+                and r["features"][4] == 400.0
+                and r["features"][5] == 0.0
+                for r in regs_flood
+            )
+        )
+        r_lote_flood = cliente.post("/api/predict/batch", json={"records": regs_flood}, headers=cabeceras)
+        deteccion_flood_ok = r_lote_flood.status_code == 200 and r_lote_flood.json().get("ddos") == 2
+
+        afirmar_prueba(
+            "Direction Pinning LRU, Reversión Mid-Stream Unidireccional y Conntrack Anti-FP",
+            pinning_descarga_ok and conntrack_descarga_ok and reversion_midstream_ok and deteccion_flood_ok,
+            f"Descarga/Zoom/WebRTC DDoS={r_lote_descarga.json().get('ddos')}/6 | Flood ACK DDoS={r_lote_flood.json().get('ddos')}/2",
         )
 
     print("=" * 65)

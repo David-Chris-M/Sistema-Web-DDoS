@@ -16,7 +16,7 @@ import numpy as np
 import requests
 
 try:
-    from scapy.all import ICMP, IP, TCP, UDP, Ether, PcapReader, conf as scapy_conf, sniff
+    from scapy.all import ICMP, IP, TCP, UDP, Ether, PcapReader, conf as scapy_conf, get_working_ifaces, sniff
     TIENE_SCAPY = True
 except ImportError:  # pragma: no cover
     TIENE_SCAPY = False
@@ -195,6 +195,106 @@ def _parsear_trama_binaria_rapida(trama: bytes, marca_tiempo: float):
     return None
 
 
+def _detectar_red_host_principal():
+    ip_host = (os.getenv("LOCAL_HOST_IP") or "").strip()
+    if not ip_host:
+        for destino_prueba in (("192.168.18.1", 80), ("8.8.8.8", 80)):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                    sock.connect(destino_prueba)
+                    candidata = sock.getsockname()[0]
+                    if candidata and not candidata.startswith(("127.", "169.254.")):
+                        ip_host = candidata
+                        break
+            except Exception:
+                pass
+
+    interfaz_env = (os.getenv("SNIFF_IFACE") or "").strip()
+    interfaz_elegida = interfaz_env or None
+    etiqueta_interfaz = interfaz_env or "Predeterminada"
+
+    if TIENE_SCAPY:
+        try:
+            palabras_virtuales = (
+                "virtual", "hyper-v", "vethernet", "vmware", "vbox",
+                "loopback", "wi-fi direct", "wan miniport", "teredo", "bluetooth"
+            )
+            interfaces_activas = list(get_working_ifaces())
+
+            if not ip_host:
+                for iface in interfaces_activas:
+                    ip_if = getattr(iface, "ip", "") or ""
+                    desc_if = f"{getattr(iface, 'name', '')} {getattr(iface, 'description', '')}".lower()
+                    if ip_if.startswith("192.168.18.") and not any(v in desc_if for v in palabras_virtuales):
+                        ip_host = ip_if
+                        break
+                if not ip_host:
+                    for iface in interfaces_activas:
+                        ip_if = getattr(iface, "ip", "") or ""
+                        desc_if = f"{getattr(iface, 'name', '')} {getattr(iface, 'description', '')}".lower()
+                        if ip_if.startswith(("192.168.", "10.")) and not any(v in desc_if for v in palabras_virtuales):
+                            ip_host = ip_if
+                            break
+
+            if not interfaz_elegida:
+                mejor_iface = None
+                for iface in interfaces_activas:
+                    ip_if = getattr(iface, "ip", "") or ""
+                    desc_if = f"{getattr(iface, 'name', '')} {getattr(iface, 'description', '')}".lower()
+                    if ip_host and ip_if == ip_host:
+                        mejor_iface = iface
+                        break
+                    if ip_if.startswith("192.168.18.") and not any(v in desc_if for v in palabras_virtuales):
+                        mejor_iface = iface
+                if mejor_iface is None:
+                    for iface in interfaces_activas:
+                        ip_if = getattr(iface, "ip", "") or ""
+                        desc_if = f"{getattr(iface, 'name', '')} {getattr(iface, 'description', '')}".lower()
+                        if ip_if.startswith(("192.168.", "10.")) and not any(v in desc_if for v in palabras_virtuales):
+                            mejor_iface = iface
+                            break
+                if mejor_iface is not None:
+                    interfaz_elegida = getattr(mejor_iface, "name", None) or mejor_iface
+                    ip_mostrar = getattr(mejor_iface, "ip", "") or ip_host or "sin-ip"
+                    desc_mostrar = getattr(mejor_iface, "description", "") or str(interfaz_elegida)
+                    etiqueta_interfaz = f"{interfaz_elegida} ({ip_mostrar} - {desc_mostrar})"
+                    if not ip_host and ip_mostrar != "sin-ip":
+                        ip_host = ip_mostrar
+        except Exception:
+            pass
+
+    if not ip_host:
+        ip_host = "192.168.18.10"
+
+    ips_propias = {ip_host, "127.0.0.1", "192.168.18.10"}
+    return ip_host, ips_propias, interfaz_elegida, etiqueta_interfaz
+
+
+IP_LOCAL_HOST, IPS_PROPIAS_PC, INTERFAZ_CAPTURA, ETIQUETA_INTERFAZ_CAPTURA = _detectar_red_host_principal()
+
+
+def _es_ip_local_privada(ip_str: str) -> bool:
+    if not ip_str:
+        return False
+    return ip_str in IPS_PROPIAS_PC
+
+
+def _es_puerto_multimedia_o_web_udp(puerto: int) -> bool:
+    return (
+        puerto in (53, 80, 443, 3478, 3479)
+        or (8801 <= puerto <= 8810)
+        or (19300 <= puerto <= 19309)
+    )
+
+
+def _clave_canonica_conexion(ip_a: str, puerto_a: int, ip_b: str, puerto_b: int, proto: int) -> tuple:
+    extremo_a = (ip_a, puerto_a)
+    extremo_b = (ip_b, puerto_b)
+    if extremo_a <= extremo_b:
+        return (ip_a, puerto_a, ip_b, puerto_b, proto)
+    return (ip_b, puerto_b, ip_a, puerto_a, proto)
+
+
 # --- 1. Acumulador de Estadísticas del Flujo (5-Tupla) ---
 class EstadisticasFlujo:
     __slots__ = (
@@ -205,7 +305,8 @@ class EstadisticasFlujo:
         "urg_ida", "urg_vuelta", "longitud_cabecera_ida", "longitud_cabecera_vuelta",
         "ventana_inicial_ida", "ventana_inicial_vuelta", "paquetes_datos_ida",
         "segmento_minimo_ida", "inicio_activo", "fin_activo", "tiempos_activos",
-        "tiempos_inactivos", "cerrado_por_bandera"
+        "tiempos_inactivos", "cerrado_por_bandera", "anclado_midstream",
+        "sesion_local_confirmada",
     )
 
     def __init__(self, clave, marca_tiempo, ip_origen, puerto_origen, ip_destino, puerto_destino, protocolo, nombre_protocolo):
@@ -227,6 +328,34 @@ class EstadisticasFlujo:
         self.inicio_activo = self.fin_activo = marca_tiempo
         self.tiempos_activos, self.tiempos_inactivos = [], []
         self.cerrado_por_bandera = False
+        self.anclado_midstream = False
+        self.sesion_local_confirmada = False
+
+    def invertir_direccion(self) -> None:
+        self.ip_origen, self.ip_destino = self.ip_destino, self.ip_origen
+        self.puerto_origen, self.puerto_destino = self.puerto_destino, self.puerto_origen
+        self.clave = (self.ip_origen, self.puerto_origen, self.ip_destino, self.puerto_destino, self.protocolo)
+        self.longitudes_ida, self.longitudes_vuelta = self.longitudes_vuelta, self.longitudes_ida
+        self.iat_ida, self.iat_vuelta = self.iat_vuelta, self.iat_ida
+        self.ultimo_tiempo_ida, self.ultimo_tiempo_vuelta = self.ultimo_tiempo_vuelta, self.ultimo_tiempo_ida
+        self.psh_ida, self.psh_vuelta = self.psh_vuelta, self.psh_ida
+        self.urg_ida, self.urg_vuelta = self.urg_vuelta, self.urg_ida
+        self.longitud_cabecera_ida, self.longitud_cabecera_vuelta = self.longitud_cabecera_vuelta, self.longitud_cabecera_ida
+        self.ventana_inicial_ida, self.ventana_inicial_vuelta = self.ventana_inicial_vuelta, self.ventana_inicial_ida
+        if self.protocolo == 6:
+            self.paquetes_datos_ida = sum(1 for x in self.longitudes_ida if x > 0)
+            self.segmento_minimo_ida = (
+                max(20, int(self.longitud_cabecera_ida // len(self.longitudes_ida)))
+                if self.longitudes_ida
+                else None
+            )
+        elif self.protocolo == 17:
+            self.paquetes_datos_ida = 0
+            self.segmento_minimo_ida = BYTES_CABECERA_UDP if self.longitudes_ida else None
+        else:
+            self.paquetes_datos_ida = 0
+            self.segmento_minimo_ida = None
+        self.anclado_midstream = False
 
     @property
     def total_paquetes(self) -> int:
@@ -414,9 +543,13 @@ class EstadisticasFlujo:
 # --- 2. Tabla de Gestión de Flujos (LRU) ---
 class TablaFlujos:
     MAXIMO_EXTRACCION_POR_CICLO = 10000
+    MAXIMO_DIRECCIONES_PINNING = 8192
+    TTL_SESION_ACTIVA_SEGUNDOS = 300.0
 
     def __init__(self) -> None:
         self.flujos: "OrderedDict[tuple, EstadisticasFlujo]" = OrderedDict()
+        self.sesiones_activas: "OrderedDict[tuple, dict]" = OrderedDict()
+        self.direcciones_conexion = self.sesiones_activas
         self.bloqueo = threading.Lock()
         self.cola_listos: deque = deque(maxlen=MAXIMO_COLA_LISTOS)
         self.contadores = {"paquetes": 0, "exportados": 0, "desalojados": 0, "descartados_memoria": 0}
@@ -448,6 +581,13 @@ class TablaFlujos:
     ) -> None:
         clave_ida = (ip_origen, puerto_origen, ip_destino, puerto_destino, proto)
         clave_retorno = (ip_destino, puerto_destino, ip_origen, puerto_origen, proto)
+        clave_canonica = _clave_canonica_conexion(ip_origen, puerto_origen, ip_destino, puerto_destino, proto)
+
+        es_origen_local = _es_ip_local_privada(ip_origen)
+        es_destino_local = _es_ip_local_privada(ip_destino)
+        es_puerto_testbed = (puerto_origen == 9999 or puerto_destino == 9999)
+        es_nuevo_syn_puro = (proto == 6 and (banderas_tcp & 0x12) == 0x02)
+        es_rst_puro = (proto == 6 and (banderas_tcp & 0x04) != 0 and longitud_datos == 0)
 
         with self.bloqueo:
             self.contadores["paquetes"] += 1
@@ -461,19 +601,95 @@ class TablaFlujos:
             flujo = self.flujos.get(clave_elegida) if clave_elegida else None
 
             if flujo is not None and (marca_tiempo - flujo.tiempo_inicio) > TIEMPO_VENTANA_ACTIVA_SEGUNDOS:
-                self._exportar_flujo(clave_elegida)
-                flujo, es_ida = None, True
+                self._exportar_flujo(clave_elegida, cierre_definitivo=False)
+                flujo = None
 
             if flujo is None:
                 if len(self.flujos) >= MAXIMO_FLUJOS_ACTIVOS:
                     victima = self._seleccionar_victima_desalojo(marca_tiempo)
-                    self._exportar_flujo(victima)
+                    self._exportar_flujo(victima, cierre_definitivo=False)
                     self.contadores["desalojados"] += 1
 
-                clave_elegida = clave_ida
-                flujo = EstadisticasFlujo(
-                    clave_elegida, marca_tiempo, ip_origen, puerto_origen, ip_destino, puerto_destino, proto, nombre_protocolo
+                sesion = self.sesiones_activas.get(clave_canonica)
+                ttl_sesion = (
+                    self.TTL_SESION_ACTIVA_SEGUNDOS
+                    if (sesion is not None and sesion.get("sesion_local_confirmada"))
+                    else (TIEMPO_INACTIVIDAD_SEGUNDOS * 3.0)
                 )
+                if (
+                    sesion is not None
+                    and (marca_tiempo - sesion["ultimo_visto"]) <= ttl_sesion
+                    and not es_nuevo_syn_puro
+                    and not es_puerto_testbed
+                ):
+                    if es_origen_local and not es_rst_puro and not _es_ip_local_privada(sesion["clave_direccion"][0]):
+                        sesion["clave_direccion"] = clave_ida
+                    clave_elegida = sesion["clave_direccion"]
+                    es_ida = (clave_ida == clave_elegida)
+                    es_midstream = bool(sesion["es_midstream"]) and not bool(sesion["sesion_local_confirmada"])
+                    sesion["ultimo_visto"] = marca_tiempo
+                    self.sesiones_activas.move_to_end(clave_canonica)
+                elif es_puerto_testbed:
+                    if puerto_origen == 9999 and puerto_destino != 9999:
+                        clave_elegida = clave_retorno
+                        es_ida = False
+                    else:
+                        clave_elegida = clave_ida
+                        es_ida = True
+                    es_midstream = False
+                    self.sesiones_activas[clave_canonica] = {
+                        "clave_direccion": clave_elegida,
+                        "ultimo_visto": marca_tiempo,
+                        "es_midstream": False,
+                        "pkts_locales_historicos": 0,
+                        "sesion_local_confirmada": False,
+                    }
+                    self.sesiones_activas.move_to_end(clave_canonica)
+                    while len(self.sesiones_activas) > self.MAXIMO_DIRECCIONES_PINNING:
+                        self.sesiones_activas.popitem(last=False)
+                else:
+                    anclar_local_midstream = (
+                        not es_origen_local
+                        and es_destino_local
+                        and not es_puerto_testbed
+                        and (
+                            (proto == 6 and (banderas_tcp & 0x12) != 0x02 and (banderas_tcp & 0x04) == 0)
+                            or (proto == 17 and _es_puerto_multimedia_o_web_udp(puerto_origen) and puerto_destino >= 1024)
+                        )
+                    )
+                    if anclar_local_midstream:
+                        clave_elegida = clave_retorno
+                        es_ida = False
+                        es_midstream = True
+                    else:
+                        clave_elegida = clave_ida
+                        es_ida = True
+                        es_midstream = False
+
+                    self.sesiones_activas[clave_canonica] = {
+                        "clave_direccion": clave_elegida,
+                        "ultimo_visto": marca_tiempo,
+                        "es_midstream": es_midstream,
+                        "pkts_locales_historicos": 0,
+                        "sesion_local_confirmada": False,
+                    }
+                    self.sesiones_activas.move_to_end(clave_canonica)
+                    while len(self.sesiones_activas) > self.MAXIMO_DIRECCIONES_PINNING:
+                        self.sesiones_activas.popitem(last=False)
+
+                sesion_actual = self.sesiones_activas.get(clave_canonica)
+                flujo = EstadisticasFlujo(
+                    clave_elegida,
+                    marca_tiempo,
+                    clave_elegida[0],
+                    clave_elegida[1],
+                    clave_elegida[2],
+                    clave_elegida[3],
+                    proto,
+                    nombre_protocolo,
+                )
+                flujo.anclado_midstream = es_midstream
+                flujo.sesion_local_confirmada = bool(sesion_actual and sesion_actual["sesion_local_confirmada"])
                 self.flujos[clave_elegida] = flujo
 
             flujo.actualizar_campos_rapidos(
@@ -481,9 +697,31 @@ class TablaFlujos:
             )
             self.flujos.move_to_end(clave_elegida)
 
+            sesion_actual = self.sesiones_activas.get(clave_canonica)
+            if sesion_actual is not None:
+                sesion_actual["ultimo_visto"] = marca_tiempo
+                if es_origen_local and not es_puerto_testbed and not es_rst_puro:
+                    sesion_actual["pkts_locales_historicos"] += 1
+                    sesion_actual["sesion_local_confirmada"] = True
+                    sesion_actual["es_midstream"] = False
+                if (
+                    len(flujo.longitudes_ida) > 0
+                    and len(flujo.longitudes_vuelta) > 0
+                    and (proto != 6 or (banderas_tcp & 0x04) == 0)
+                ):
+                    sesion_actual["es_midstream"] = False
+                    if _es_ip_local_privada(flujo.ip_origen) and not es_puerto_testbed:
+                        sesion_actual["sesion_local_confirmada"] = True
+                if sesion_actual["sesion_local_confirmada"]:
+                    flujo.sesion_local_confirmada = True
+                    flujo.anclado_midstream = False
+                self.sesiones_activas.move_to_end(clave_canonica)
+
             limite_paquetes = PAQUETES_CORTE_TEMPRANO if PAQUETES_CORTE_TEMPRANO > 0 else MAXIMO_MUESTRAS_POR_FLUJO
-            if flujo.cerrado_por_bandera or flujo.total_paquetes >= limite_paquetes:
-                self._exportar_flujo(clave_elegida)
+            if flujo.cerrado_por_bandera:
+                self._exportar_flujo(clave_elegida, cierre_definitivo=True)
+            elif flujo.total_paquetes >= limite_paquetes:
+                self._exportar_flujo(clave_elegida, cierre_definitivo=False)
 
     def procesar_trama_cruda(self, trama: bytes, marca_tiempo: float = None) -> None:
         campos = _parsear_trama_binaria_rapida(trama, time.time() if marca_tiempo is None else float(marca_tiempo))
@@ -533,9 +771,33 @@ class TablaFlujos:
 
     process = procesar_paquete
 
-    def _exportar_flujo(self, clave) -> None:
+    def _exportar_flujo(self, clave, cierre_definitivo: bool = False) -> None:
         flujo = self.flujos.pop(clave, None)
         if flujo is not None:
+            clave_canonica = _clave_canonica_conexion(
+                flujo.ip_origen, flujo.puerto_origen, flujo.ip_destino, flujo.puerto_destino, flujo.protocolo
+            )
+            sesion = self.sesiones_activas.get(clave_canonica)
+            sesion_confirmada = bool(
+                flujo.sesion_local_confirmada
+                or (sesion is not None and sesion.get("sesion_local_confirmada"))
+            )
+            if (
+                not sesion_confirmada
+                and flujo.anclado_midstream
+                and (
+                    len(flujo.longitudes_ida) == 0
+                    or (flujo.banderas_tcp["RST"] == 1 and flujo.paquetes_datos_ida == 0)
+                )
+            ):
+                flujo.invertir_direccion()
+                if sesion is not None:
+                    sesion["clave_direccion"] = flujo.clave
+                    sesion["es_midstream"] = False
+
+            if cierre_definitivo and not sesion_confirmada:
+                self.sesiones_activas.pop(clave_canonica, None)
+
             if self.cola_listos.maxlen and len(self.cola_listos) >= self.cola_listos.maxlen:
                 self.contadores["descartados_memoria"] += 1
             self.cola_listos.append(flujo)
@@ -547,7 +809,23 @@ class TablaFlujos:
                 clave, flujo = next(iter(self.flujos.items()))
                 if not forzar_todos and (tiempo_actual - flujo.tiempo_ultimo) <= TIEMPO_INACTIVIDAD_SEGUNDOS:
                     break
-                self._exportar_flujo(clave)
+                self._exportar_flujo(clave, cierre_definitivo=True)
+
+            if forzar_todos:
+                self.sesiones_activas.clear()
+            else:
+                while self.sesiones_activas:
+                    _, sesion = next(iter(self.sesiones_activas.items()))
+                    ttl_sesion = (
+                        self.TTL_SESION_ACTIVA_SEGUNDOS
+                        if sesion.get("sesion_local_confirmada")
+                        else TIEMPO_INACTIVIDAD_SEGUNDOS
+                    )
+                    if (tiempo_actual - sesion["ultimo_visto"]) <= ttl_sesion:
+                        break
+                    if sesion["clave_direccion"] in self.flujos:
+                        break
+                    self.sesiones_activas.popitem(last=False)
 
     expire = expirar_inactivos
 
@@ -558,6 +836,21 @@ class TablaFlujos:
                 flujos_listos.append(self.cola_listos.popleft())
 
         tiempo_actual = time.time()
+        for flujo in flujos_listos:
+            if flujo.total_paquetes > 100:
+                registro_logger.info(
+                    "[FLUJO >100 PAQ] %s:%d -> %s:%d (%s) | Paquetes=%d (Ida=%d, Vuelta=%d) | Bytes=%d | Duración=%.2fms",
+                    flujo.ip_origen,
+                    flujo.puerto_origen,
+                    flujo.ip_destino,
+                    flujo.puerto_destino,
+                    flujo.nombre_protocolo,
+                    flujo.total_paquetes,
+                    len(flujo.longitudes_ida),
+                    len(flujo.longitudes_vuelta),
+                    sum(flujo.longitudes_ida) + sum(flujo.longitudes_vuelta),
+                    max(flujo.tiempo_ultimo - flujo.tiempo_inicio, 0.0) * 1000.0,
+                )
         return [flujo.hacia_registro(tiempo_actual) for flujo in flujos_listos]
 
     drain_records = extraer_registros
@@ -769,8 +1062,10 @@ def principal() -> None:
         scapy_conf.layers.filter([Ether, IP, TCP, UDP, ICMP])
     except Exception:
         pass
-    registro_logger.info("Sensor NIDS activado | Interfaz: %s | Filtro BPF: '%s' | Snaplen: %dB | Destino: %s",
-                         INTERFAZ_CAPTURA or "Predeterminada", filtro_bpf, SNAPLEN_CAPTURA, URL_LOTE_API)
+    registro_logger.info(
+        "Sensor NIDS activado | Interfaz: %s | IP Host Local: %s | Filtro BPF: '%s' | Snaplen: %dB | Destino: %s",
+        ETIQUETA_INTERFAZ_CAPTURA, IP_LOCAL_HOST, filtro_bpf, SNAPLEN_CAPTURA, URL_LOTE_API
+    )
     registro_logger.info("Detección Temprana Activa (Ventana: %.1fs | Inactividad: %.1fs)",
                          TIEMPO_VENTANA_ACTIVA_SEGUNDOS, TIEMPO_INACTIVIDAD_SEGUNDOS)
 

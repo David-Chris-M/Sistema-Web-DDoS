@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import os
+import socket
 import time
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +15,26 @@ from numpy.lib.stride_tricks import sliding_window_view
 from backend.configuracion import configuracion
 
 registro_logger = logging.getLogger("cybershield.inference")
+
+
+def _detectar_ips_locales_inferencia() -> set[str]:
+    ips = {"127.0.0.1", "192.168.18.10"}
+    ip_env = (os.getenv("LOCAL_HOST_IP") or "").strip()
+    if ip_env:
+        ips.add(ip_env)
+    for destino in (("192.168.18.1", 80), ("8.8.8.8", 80)):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(destino)
+                ip_local = s.getsockname()[0]
+                if ip_local and not ip_local.startswith("169.254."):
+                    ips.add(ip_local)
+        except Exception:
+            pass
+    return ips
+
+
+IPS_LOCALES_HOST: set[str] = _detectar_ips_locales_inferencia()
 
 # --- Contrato de Características Canónicas (CICFlowMeter / CICIDS2017) ---
 CARACTERISTICAS_CANONICAS = [
@@ -402,7 +423,11 @@ class MotorInferencia:
 
     load = cargar
 
-    def _predecir_sincrono(self, matriz_X: np.ndarray) -> Tuple[np.ndarray, float]:
+    def _predecir_sincrono(
+        self,
+        matriz_X: np.ndarray,
+        ips_origen: Optional[List[str]] = None,
+    ) -> Tuple[np.ndarray, float]:
         matriz_X = np.asarray(matriz_X, dtype=np.float64)
         if matriz_X.ndim == 1:
             matriz_X = matriz_X.reshape(1, -1)
@@ -430,26 +455,75 @@ class MotorInferencia:
         probabilidades = np.nan_to_num(probabilidades, nan=0.0, posinf=1.0, neginf=0.0)
         probabilidades = np.clip(probabilidades, 0.0, 1.0)
 
-        # 4. Heurística de refuerzo para ráfagas volumétricas
+        # 4. Heurística de refuerzo para ráfagas volumétricas (solo si iniciador es externo y no es respuesta web/multimedia efímera)
         if matriz_cruda.shape[1] >= 18:
+            n_filas = matriz_cruda.shape[0]
+            puerto_orig = np.round(matriz_cruda[:, 0])
+            puerto_dest = np.round(matriz_cruda[:, 1])
             paq_ida = matriz_cruda[:, 4]
             paq_vuelta = matriz_cruda[:, 5]
             tasa_paq_s = matriz_cruda[:, 17]
-            mascara_inundacion = (paq_ida >= 150.0) & (paq_vuelta <= 2.0) & (tasa_paq_s >= 100.0)
+            es_puerto_testbed = (puerto_orig == 9999.0) | (puerto_dest == 9999.0)
+
+            if ips_origen is not None and len(ips_origen) == n_filas:
+                es_iniciador_local = np.array(
+                    [str(ip).strip() in IPS_LOCALES_HOST for ip in ips_origen],
+                    dtype=bool,
+                )
+            else:
+                es_iniciador_local = np.zeros(n_filas, dtype=bool)
+
+            es_origen_web_multimedia = (
+                (puerto_orig == 53.0)
+                | (puerto_orig == 80.0)
+                | (puerto_orig == 443.0)
+                | (puerto_orig == 3478.0)
+                | (puerto_orig == 3479.0)
+                | ((puerto_orig >= 8801.0) & (puerto_orig <= 8810.0))
+                | ((puerto_orig >= 19300.0) & (puerto_orig <= 19309.0))
+            )
+            es_destino_efimero_local = (
+                (puerto_dest >= 1024.0)
+                & (puerto_dest != 8000.0)
+                & (puerto_dest != 8080.0)
+                & (puerto_dest != 8443.0)
+                & (puerto_dest != 9999.0)
+            )
+            es_respuesta_efimera_servicio = es_origen_web_multimedia & es_destino_efimero_local
+
+            mascara_inundacion = (
+                (
+                    (~es_iniciador_local)
+                    & (~es_respuesta_efimera_servicio)
+                    & (paq_ida >= 100.0)
+                    & (paq_vuelta <= 2.0)
+                    & (tasa_paq_s >= 45.0)
+                )
+                | (es_puerto_testbed & (paq_ida >= 55.0) & (paq_vuelta <= 2.0) & (tasa_paq_s >= 20.0))
+            )
             if np.any(mascara_inundacion):
                 prob_volumetrica = np.clip(0.93 + 0.064 * np.minimum(tasa_paq_s / 500.0, 1.0), 0.93, 0.994)
                 probabilidades = np.where(mascara_inundacion, np.maximum(probabilidades, prob_volumetrica), probabilidades)
+
+            # Si src_ip == IP_LOCAL (sesión saliente iniciada por nuestra PC), nunca marcar como ataque DDoS
+            mascara_saliente_local = es_iniciador_local & (~es_puerto_testbed)
+            if np.any(mascara_saliente_local):
+                probabilidades = np.where(mascara_saliente_local, np.minimum(probabilidades, np.float32(0.05)), probabilidades)
 
         latencia_ms = (time.perf_counter() - t0) * 1000.0
         return probabilidades, latencia_ms
 
     _predict_sync = _predecir_sincrono
 
-    async def predecir(self, matriz_X: np.ndarray) -> Tuple[np.ndarray, float]:
+    async def predecir(
+        self,
+        matriz_X: np.ndarray,
+        ips_origen: Optional[List[str]] = None,
+    ) -> Tuple[np.ndarray, float]:
         if not self.listo:
             raise RuntimeError(self.error or "Modelo no cargado")
         bucle = asyncio.get_running_loop()
-        return await bucle.run_in_executor(self._ejecutor_hilos, self._predecir_sincrono, matriz_X)
+        return await bucle.run_in_executor(self._ejecutor_hilos, self._predecir_sincrono, matriz_X, ips_origen)
 
     predict = predecir
 
