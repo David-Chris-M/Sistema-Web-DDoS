@@ -726,10 +726,8 @@ function crearElementoFilaTabla(elemento) {
         <td><code class="small text-secondary">${escaparHtml(ipDest)}</code></td>
         <td><span class="badge bg-light text-dark border">${escaparHtml(proto)}</span></td>
         <td>${htmlClasificacion}</td>
-        <td>
-            <span class="fw-semibold">${escaparHtml(conf)}</span>
-            <span class="text-muted small ms-1">(p=${escaparHtml(prob)})</span>
-        </td>
+        <td>${escaparHtml(conf)}</td>
+        <td class="text-muted">${escaparHtml(prob)}</td>
         <td>${estadoNids}</td>
     `;
     return fila;
