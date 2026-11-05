@@ -44,6 +44,45 @@ function obtenerColorHexProtocolo(protocolo) {
     return '#dc2626';
 }
 
+function clasificarContextoForense(ip, fuente, protocolo) {
+    const ipStr = String(ip || '').trim();
+    const srcStr = String(fuente || 'sensor').trim().toLowerCase();
+    const p = String(protocolo || 'TCP').trim().toUpperCase();
+
+    let canalEtiqueta = 'Sensor Vivo';
+    let canalClase = 'bg-success bg-opacity-10 text-success border border-success border-opacity-25';
+    if (srcStr === 'simulation') {
+        canalEtiqueta = 'Simulador';
+        canalClase = 'bg-secondary bg-opacity-10 text-secondary border border-secondary border-opacity-25';
+    } else if (srcStr === 'csv_pyme') {
+        canalEtiqueta = 'Auditoría CSV';
+        canalClase = 'bg-info bg-opacity-10 text-info border border-info border-opacity-25';
+    }
+
+    const esRfc5737 = ipStr.startsWith('203.0.113.') || ipStr.startsWith('198.51.100.') || ipStr.startsWith('192.0.2.');
+    const esLan192 = ipStr.startsWith('192.168.');
+    const esLan10 = ipStr.startsWith('10.');
+    const oct2 = ipStr.startsWith('172.') ? parseInt(ipStr.split('.')[1] || '0', 10) : 0;
+    const esLan172 = ipStr.startsWith('172.') && oct2 >= 16 && oct2 <= 31;
+    const esLoopback = ipStr === '127.0.0.1' || ipStr === '::1';
+
+    let alcanceEtiqueta = 'WAN Pública';
+    let alcanceClase = 'bg-dark text-white';
+    if (srcStr === 'simulation' || esRfc5737) {
+        alcanceEtiqueta = 'Testbed';
+        alcanceClase = 'bg-secondary text-white';
+    } else if (esLan192 || esLan10 || esLan172 || esLoopback) {
+        alcanceEtiqueta = 'LAN Local';
+        alcanceClase = 'bg-warning text-dark';
+    }
+
+    let vectorAtaque = 'TCP SYN/ACK Flood';
+    if (p === 'UDP') vectorAtaque = 'UDP Volumetric Flood';
+    else if (p === 'ICMP') vectorAtaque = 'ICMP Ping Flood';
+
+    return { alcanceEtiqueta, alcanceClase, canalEtiqueta, canalClase, vectorAtaque };
+}
+
 function actualizarEnlaceExportacionCsv() {
     const btnCsv = document.getElementById('btnExportCsv');
     if (!btnCsv) return;
@@ -183,17 +222,34 @@ async function cargarTablaFlujos() {
             const fila = document.createElement('tr');
             const horaFormateada = formatearHoraLocal(flujo.timestamp);
 
-            const textoPrediccion = esAtaque ? `DDoS • ${proto}` : 'BENIGN';
+            const ipOrigenRaw = flujo.src_ip || '192.168.18.x';
+            const ctxForense = clasificarContextoForense(ipOrigenRaw, flujo.source, proto);
+            const textoPrediccion = esAtaque ? `DDoS • ${ctxForense.vectorAtaque}` : 'BENIGN (Legítimo)';
             const confNum = Number.isFinite(Number(flujo.confidence_percentage)) ? Number(flujo.confidence_percentage) : 0;
+
+            const bytesVal = Number(flujo.total_bytes) || 1024;
+            const durVal = Math.max(1, Number(flujo.duration_ms) || 120);
+            const kbpsVal = ((bytesVal / 1024) / (durVal / 1000)).toFixed(1);
 
             fila.innerHTML = `
                 <td class="fw-semibold text-secondary">${escaparHtml(horaFormateada)}</td>
-                <td><code class="text-dark">${escaparHtml(flujo.src_ip || '192.168.18.x')}</code></td>
+                <td>
+                    <div class="d-flex align-items-center gap-1 flex-wrap">
+                        <code class="text-dark fw-semibold">${escaparHtml(ipOrigenRaw)}</code>
+                        <span class="badge ${ctxForense.alcanceClase}" style="font-size: 0.65rem;">${escaparHtml(ctxForense.alcanceEtiqueta)}</span>
+                    </div>
+                </td>
                 <td><code class="text-dark">${escaparHtml(flujo.dst_ip || '10.0.0.x')}</code></td>
-                <td><span class="badge bg-light text-dark border">${escaparHtml(proto)}</span></td>
+                <td>
+                    <span class="badge bg-light text-dark border me-1">${escaparHtml(proto)}</span>
+                    <span class="badge ${ctxForense.canalClase}" style="font-size: 0.65rem;">${escaparHtml(ctxForense.canalEtiqueta)}</span>
+                </td>
                 <td><span class="${claseBadge} px-2 py-1" style="${estiloBadge}">${escaparHtml(textoPrediccion)}</span></td>
-                <td>${flujo.duration_ms ? Number(flujo.duration_ms).toFixed(1) : '120.0'} ms</td>
-                <td>${(Number(flujo.total_bytes) || 1024).toLocaleString()} B</td>
+                <td>${durVal.toFixed(1)} ms</td>
+                <td>
+                    <div>${bytesVal.toLocaleString()} B</div>
+                    <div class="text-muted" style="font-size: 0.7rem;">${escaparHtml(kbpsVal)} KB/s</div>
+                </td>
                 <td>
                     <div class="d-flex align-items-center gap-2">
                         <div class="progress flex-grow-1" style="height: 6px; min-width: 60px;">

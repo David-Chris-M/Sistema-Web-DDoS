@@ -681,13 +681,31 @@ function crearElementoFilaTabla(elemento) {
     const conf = elemento.confidence_percentage !== undefined ? `${elemento.confidence_percentage}%` : '--';
     const prob = elemento.probability !== undefined ? elemento.probability : (esAtaque ? 0.99 : 0.01);
 
+    const ipOrig = String(elemento.src_ip || '192.168.18.x').trim();
+    const ipDest = String(elemento.dst_ip || '10.0.0.x').trim();
+    const fuenteRaw = String(elemento.source || 'sensor').toLowerCase();
+    const esRfc5737 = ipOrig.startsWith('203.0.113.') || ipOrig.startsWith('198.51.100.') || ipOrig.startsWith('192.0.2.');
+    const esLan = ipOrig.startsWith('192.168.') || ipOrig.startsWith('10.') || ipOrig === '127.0.0.1' ||
+        (ipOrig.startsWith('172.') && parseInt(ipOrig.split('.')[1] || '0', 10) >= 16 && parseInt(ipOrig.split('.')[1] || '0', 10) <= 31);
+
+    let badgeAlcance = '<span class="badge bg-dark text-white" style="font-size: 0.65rem;">WAN</span>';
+    if (fuenteRaw === 'simulation' || esRfc5737) {
+        badgeAlcance = '<span class="badge bg-secondary text-white" style="font-size: 0.65rem;">Testbed</span>';
+    } else if (esLan) {
+        badgeAlcance = '<span class="badge bg-warning text-dark" style="font-size: 0.65rem;">LAN</span>';
+    }
+
+    let vectorNombre = 'TCP SYN/ACK Flood';
+    if (proto === 'UDP') vectorNombre = 'UDP Volumetric Flood';
+    else if (proto === 'ICMP') vectorNombre = 'ICMP Ping Flood';
+
     let htmlClasificacion;
     let estadoNids;
 
     if (esAtaque) {
         const estiloBadge = obtenerColorBadgeProtocoloAtaque(proto);
         htmlClasificacion = `<span class="badge px-2 py-1" style="${estiloBadge}">${escaparHtml(`DDoS • ${proto}`)}</span>`;
-        estadoNids = `<span class="badge" style="${estiloBadge} opacity: 0.92;"><i class="bi bi-exclamation-octagon-fill me-1"></i>Amenaza ${escaparHtml(proto)}</span>`;
+        estadoNids = `<span class="badge" style="${estiloBadge} opacity: 0.92;"><i class="bi bi-exclamation-octagon-fill me-1"></i>Amenaza ${escaparHtml(vectorNombre)}</span>`;
     } else if (esPicoInusual) {
         htmlClasificacion = `<span class="badge bg-warning-subtle text-warning-emphasis border border-warning-subtle px-2 py-1">${escaparHtml(`PICO RED • ${proto}`)}</span>`;
         const etiquetaAmigable = elemento.status_label || 'Pico de Red / Tráfico Intenso (Sin riesgo)';
@@ -699,6 +717,14 @@ function crearElementoFilaTabla(elemento) {
 
     fila.innerHTML = `
         <td class="fw-semibold text-secondary">${escaparHtml(horaFormateada)}</td>
+        <td>
+            <div class="d-flex align-items-center gap-1 flex-wrap">
+                <code class="small fw-semibold">${escaparHtml(ipOrig)}</code>
+                <span class="text-muted small">→</span>
+                <code class="small text-secondary">${escaparHtml(ipDest)}</code>
+                ${badgeAlcance}
+            </div>
+        </td>
         <td><span class="badge bg-light text-dark border">${escaparHtml(proto)}</span></td>
         <td>${htmlClasificacion}</td>
         <td>${escaparHtml(conf)}</td>

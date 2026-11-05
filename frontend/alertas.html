@@ -236,12 +236,12 @@
                     <thead class="table-light">
                         <tr>
                             <th>Fecha y Hora</th>
-                            <th>IP Atacante</th>
+                            <th>IP Atacante y Naturaleza</th>
                             <th>IP Destino</th>
-                            <th>Protocolo</th>
+                            <th>Vector DDoS / Protocolo</th>
                             <th>Severidad</th>
                             <th>Confianza Conv1D</th>
-                            <th>Detalle Forense</th>
+                            <th>Ficha Forense</th>
                         </tr>
                     </thead>
                     <tbody id="alertsTableBody"></tbody>
@@ -261,10 +261,10 @@
 
     <!-- Modal de Inspección de Alerta -->
     <div class="modal fade" id="actionModal" tabindex="-1">
-        <div class="modal-dialog">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
             <div class="modal-content">
                 <div class="modal-header">
-                    <h5 class="modal-title fw-bold"><i class="bi bi-exclamation-triangle-fill text-danger"></i> Detalle de Alerta NIDS</h5>
+                    <h5 class="modal-title fw-bold"><i class="bi bi-exclamation-triangle-fill text-danger me-2"></i>Ficha Forense de Alerta NIDS (Estándar NIST SP 800-94)</h5>
                     <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
                 </div>
                 <div class="modal-body" id="modalContent"></div>
@@ -277,6 +277,6 @@
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="/frontend/js/alarma_global.js?v=14"></script>
-    <script src="/frontend/js/alertas.js?v=11"></script>
+    <script src="/frontend/js/alertas.js?v=12"></script>
 </body>
 </html>
