@@ -763,7 +763,43 @@ class EsquemaUmbralDecision(BaseModel):
     threshold_percent: float = Field(..., ge=50.0, le=95.0)
 
 
+def _ip_en_cuarentena_soar_vigente(ip_str: str, ahora_epoch: float) -> Optional[dict]:
+    """
+    Verifica en O(1) si la IP origen ya se encuentra aislada en Cuarentena Activa SOAR.
+    Dado que Npcap captura tramas en NDIS (Capa 2) antes de que Windows Filtering Platform (WFP)
+    las descarte en Capa 3, suprimir estos flujos evita falsas re-alertas en el NIDS mientras
+    el Firewall del Sistema Operativo ya está bloqueando al atacante.
+    """
+    if not _modulo_soar_activo or not _cuarentena_activa:
+        return None
+    ip_limpia = (ip_str or "").strip()
+    info_q = _cuarentena_activa.get(ip_limpia)
+    if info_q is None:
+        return None
+    if info_q.get("is_permanent"):
+        return info_q
+    exp_at = info_q.get("expires_at")
+    if exp_at is not None and ahora_epoch < float(exp_at):
+        return info_q
+    return None
+
+
 async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, tiempo_recepcion: float) -> List[dict]:
+    if origen == "sensor" and _modulo_soar_activo and _cuarentena_activa:
+        ahora_q = time.time()
+        registros_activos: List[RegistroFlujo] = []
+        for r in registros:
+            info_q = _ip_en_cuarentena_soar_vigente(str(r.src_ip), ahora_q)
+            if info_q is not None:
+                info_q["mitigated_flows"] = int(info_q.get("mitigated_flows") or 0) + 1
+                info_q["mitigated_bytes"] = int(info_q.get("mitigated_bytes") or 0) + int(r.total_bytes or 0)
+                info_q["last_mitigated_at"] = fecha_a_iso_utc(obtener_utc_ingenuo())
+            else:
+                registros_activos.append(r)
+        if not registros_activos:
+            return []
+        registros = registros_activos
+
     matriz_X = np.asarray([r.features for r in registros], dtype=np.float64)
     ips_origen_lote = [str(r.src_ip) for r in registros] if origen == "sensor" else None
     try:
@@ -1545,8 +1581,9 @@ async def predecir_flujos_lote(lote: LoteRegistrosFlujo):
     return {
         "processed": len(cargas),
         "ddos": sum(p["is_attack"] for p in cargas),
+        "quarantined_dropped": max(0, len(lote.records) - len(cargas)),
         "batch_time_ms": tiempo_total_ms,
-        "avg_latency_per_flow_ms": round(tiempo_total_ms / len(cargas), 3),
+        "avg_latency_per_flow_ms": round(tiempo_total_ms / max(1, len(cargas)), 3),
     }
 
 
@@ -2523,7 +2560,7 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool =
         if es_permanente
         else "CyberShield SOAR IPS Cuarentena Temporal 15m"
     )
-    exito, detalle = _ejecutar_netsh_sincrono([
+    exito_in, detalle_in = _ejecutar_netsh_sincrono([
         "add", "rule",
         f"name={nombre_regla}",
         "dir=in",
@@ -2533,7 +2570,17 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool =
         "profile=any",
         f"description={desc}",
     ])
-    return exito, nombre_regla, detalle
+    exito_out, _ = _ejecutar_netsh_sincrono([
+        "add", "rule",
+        f"name={nombre_regla}",
+        "dir=out",
+        "action=block",
+        f"remoteip={ip_str}",
+        "enable=yes",
+        "profile=any",
+        f"description={desc}",
+    ])
+    return (exito_in or exito_out), nombre_regla, detalle_in
 
 
 def _desbloquear_ip_en_windows_firewall_sincrono(ip_str: str, nombre_regla: Optional[str] = None) -> tuple[bool, str]:
@@ -2873,6 +2920,18 @@ def _consultar_paso4_sans_isc_sincrono(ip_str: str) -> dict:
             "detail": "IP privada local (No aplica consulta externa en SANS DShield)",
         }
 
+    if es_testbed:
+        return {
+            "step": 4,
+            "title": "Reputación SANS ISC DShield",
+            "applicable": True,
+            "reports": 0,
+            "attacks": 0,
+            "malicious": False,
+            "badge": "0 Reportes (Red RFC 5737)",
+            "detail": "SANS ISC DShield: Rango académico de pruebas RFC 5737 (Sin reportes públicos en Internet)",
+        }
+
     ahora = time.monotonic()
     en_cache = _cache_sans_isc.get(ip_str)
     if en_cache and (ahora - en_cache[0]) < TTL_CACHE_FORENSE_SEG:
@@ -2991,7 +3050,7 @@ async def _aplicar_paso5_mitigacion_firewall(
         }
 
     # Si ya está bloqueada en cuarentena activa y es flujo automático, conservar estado
-    if ip_str in _cuarentena_activa and not es_manual:
+    if ip_str in _cuarentena_activa and not es_manual and not _cuarentena_activa[ip_str].get("fast_path_pending"):
         entrada_actual = _cuarentena_activa[ip_str]
         if entrada_actual.get("is_permanent"):
             return {
@@ -3042,10 +3101,15 @@ async def _aplicar_paso5_mitigacion_firewall(
 
     # 3. Bloqueo Manual (Permanente por defecto o 15m opcional) vs Automático IPS (Obligatorio 15m por Candado 3)
     es_permanente = bool(es_manual and str(modo_duracion).lower() == "permanent")
-    exito_fw, nombre_regla, detalle_fw = await run_in_threadpool(
-        _bloquear_ip_en_windows_firewall_sincrono, ip_str, es_permanente
-    )
-    ahora_epoch = time.time()
+    previa_q = _cuarentena_activa.get(ip_str) or {}
+    if previa_q.get("fast_path_fw_done") and not es_permanente:
+        exito_fw = bool(previa_q.get("firewall_os_applied", True))
+        nombre_regla = str(previa_q.get("rule_name") or _nombre_regla_firewall_ip(ip_str))
+    else:
+        exito_fw, nombre_regla, _ = await run_in_threadpool(
+            _bloquear_ip_en_windows_firewall_sincrono, ip_str, es_permanente
+        )
+    ahora_epoch = float(previa_q.get("blocked_at") or time.time()) if (previa_q.get("fast_path_pending") and not es_manual) else time.time()
     expira_epoch = None if es_permanente else (ahora_epoch + TTL_CUARENTENA_SOAR_SEG)
 
     if paso2.get("is_lan"):
@@ -3064,7 +3128,7 @@ async def _aplicar_paso5_mitigacion_firewall(
         "protocol": protocolo,
         "rule_name": nombre_regla,
         "blocked_at": ahora_epoch,
-        "blocked_at_iso": fecha_a_iso_utc(obtener_utc_ingenuo()),
+        "blocked_at_iso": previa_q.get("blocked_at_iso") if (previa_q.get("fast_path_pending") and not es_manual) else fecha_a_iso_utc(obtener_utc_ingenuo()),
         "expires_at": expira_epoch,
         "is_permanent": es_permanente,
         "duration_mode": "permanent" if es_permanente else "15m",
@@ -3072,6 +3136,9 @@ async def _aplicar_paso5_mitigacion_firewall(
         "firewall_os_applied": exito_fw,
         "mode": "Manual Permanente" if es_permanente else ("Manual 15 min" if es_manual else "Automático IPS (15m)"),
         "sans_reports": paso4.get("reports", 0),
+        "mitigated_flows": int(previa_q.get("mitigated_flows") or 0),
+        "mitigated_bytes": int(previa_q.get("mitigated_bytes") or 0),
+        "last_mitigated_at": previa_q.get("last_mitigated_at"),
     }
     _asegurar_tarea_expiracion_soar()
 
@@ -3117,11 +3184,34 @@ async def _ejecutar_pipeline_5_pasos_soar(
         ip_limpia, protocolo, features, ttl_avg_sensor=ttl_avg, ttl_std_sensor=ttl_std
     )
     ttl_para_paso2 = ttl_avg if ttl_avg is not None else paso1.get("ttl_estimated")
-    paso2, paso3, paso4 = await asyncio.gather(
-        run_in_threadpool(_consultar_paso2_arp_lan_sincrono, ip_limpia, ttl_para_paso2),
-        run_in_threadpool(_consultar_paso3_wan_asn_sincrono, ip_limpia),
-        run_in_threadpool(_consultar_paso4_sans_isc_sincrono, ip_limpia),
+
+    # Fast-Path paralelo: si aplica bloqueo automático y no está aún aplicado en el SO,
+    # ejecutar netsh advfirewall en paralelo con ARP/WAN/SANS sin esperar DNS/HTTP.
+    debe_pre_bloquear_fw = (
+        not es_manual
+        and permitir_autobloqueo
+        and _autobloqueo_soar_activo
+        and not paso1.get("spoofing_suspect")
+        and not _evaluar_candado1_ip_protegida(ip_limpia)[0]
+        and (ip_limpia not in _cuarentena_activa or _cuarentena_activa[ip_limpia].get("fast_path_pending"))
     )
+    if debe_pre_bloquear_fw:
+        (exito_fp, regla_fp, _), paso2, paso3, paso4 = await asyncio.gather(
+            run_in_threadpool(_bloquear_ip_en_windows_firewall_sincrono, ip_limpia, False),
+            run_in_threadpool(_consultar_paso2_arp_lan_sincrono, ip_limpia, ttl_para_paso2),
+            run_in_threadpool(_consultar_paso3_wan_asn_sincrono, ip_limpia),
+            run_in_threadpool(_consultar_paso4_sans_isc_sincrono, ip_limpia),
+        )
+        if ip_limpia in _cuarentena_activa:
+            _cuarentena_activa[ip_limpia]["fast_path_fw_done"] = True
+            _cuarentena_activa[ip_limpia]["firewall_os_applied"] = exito_fp
+            _cuarentena_activa[ip_limpia]["rule_name"] = regla_fp
+    else:
+        paso2, paso3, paso4 = await asyncio.gather(
+            run_in_threadpool(_consultar_paso2_arp_lan_sincrono, ip_limpia, ttl_para_paso2),
+            run_in_threadpool(_consultar_paso3_wan_asn_sincrono, ip_limpia),
+            run_in_threadpool(_consultar_paso4_sans_isc_sincrono, ip_limpia),
+        )
     paso5 = await _aplicar_paso5_mitigacion_firewall(
         ip_str=ip_limpia,
         paso1=paso1,
@@ -3189,20 +3279,55 @@ def _disparar_investigacion_soar_asincrona(
 ) -> None:
     if not _modulo_soar_activo:
         return
+    ip_limpia = (ip_atacante or "").strip()
+    if not ip_limpia:
+        return
     ahora_mono = time.monotonic()
-    ultimo_t = _ultimas_ips_investigadas.get(ip_atacante, 0.0)
+    ultimo_t = _ultimas_ips_investigadas.get(ip_limpia, 0.0)
     if (ahora_mono - ultimo_t) < COOLDOWN_INVESTIGACION_IP_SEG:
         return
 
-    _ultimas_ips_investigadas[ip_atacante] = ahora_mono
+    _ultimas_ips_investigadas[ip_limpia] = ahora_mono
     while len(_ultimas_ips_investigadas) > MAX_CACHE_SOAR_ENTRADAS:
         _ultimas_ips_investigadas.popitem(last=False)
+
+    # Fast-Path IPS: Si el autobloqueo está activo y pasa Candados 1 y 2 en O(1),
+    # registrar en _cuarentena_activa inmediatamente (<0.1ms) para suprimir ráfagas subsecuentes
+    # mientras el hilo secundario aplica netsh y enriquece ARP/ASN/SANS.
+    if permitir_autobloqueo and _autobloqueo_soar_activo and ip_limpia not in _cuarentena_activa:
+        protegida_fp, _ = _evaluar_candado1_ip_protegida(ip_limpia)
+        if not protegida_fp:
+            paso1_fp = _diagnosticar_paso1_ttl_antispoofing(
+                ip_limpia, protocolo, features, ttl_avg_sensor=ttl_avg, ttl_std_sensor=ttl_std
+            )
+            if not paso1_fp.get("spoofing_suspect"):
+                ahora_ep = time.time()
+                _cuarentena_activa[ip_limpia] = {
+                    "ip": ip_limpia,
+                    "mac": "Resolviendo ARP...",
+                    "identity": "Aislando host atacante en Firewall...",
+                    "protocol": protocolo,
+                    "rule_name": _nombre_regla_firewall_ip(ip_limpia),
+                    "blocked_at": ahora_ep,
+                    "blocked_at_iso": fecha_a_iso_utc(obtener_utc_ingenuo()),
+                    "expires_at": ahora_ep + TTL_CUARENTENA_SOAR_SEG,
+                    "is_permanent": False,
+                    "duration_mode": "15m",
+                    "ttl_seconds": int(TTL_CUARENTENA_SOAR_SEG),
+                    "firewall_os_applied": True,
+                    "mode": "Automático IPS (15m)",
+                    "sans_reports": 0,
+                    "mitigated_flows": 0,
+                    "mitigated_bytes": 0,
+                    "fast_path_pending": True,
+                }
+                _asegurar_tarea_expiracion_soar()
 
     try:
         bucle = asyncio.get_running_loop()
         bucle.create_task(
             _ejecutar_soar_con_semaforo(
-                ip_atacante=ip_atacante,
+                ip_atacante=ip_limpia,
                 ip_destino=ip_destino,
                 protocolo=protocolo,
                 confianza=confianza,
@@ -3214,7 +3339,7 @@ def _disparar_investigacion_soar_asincrona(
                 ttl_avg=ttl_avg,
                 ttl_std=ttl_std,
             ),
-            name=f"soar-investigar-{ip_atacante}",
+            name=f"soar-investigar-{ip_limpia}",
         )
     except RuntimeError:
         pass
@@ -3254,6 +3379,8 @@ async def _sembrar_investigaciones_recientes_al_activar() -> None:
         for src_ip, dst_ip, proto, conf, src_orig in reversed(atacantes_recientes):
             if not _modulo_soar_activo:
                 break
+            if src_ip in _cuarentena_activa or any(ev.get("src_ip") == src_ip for ev in _eventos_soar_recientes):
+                continue
             await _ejecutar_pipeline_5_pasos_soar(
                 ip_atacante=src_ip,
                 ip_destino=dst_ip,

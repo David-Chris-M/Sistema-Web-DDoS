@@ -120,6 +120,10 @@
             const ident = escaparHtml(item.identity || 'Host Externo');
             const regla = escaparHtml(item.rule_name || `CyberShield_Block_${ip}`);
             const esPermanente = Boolean(item.is_permanent);
+            const flujosMitigados = Number(item.mitigated_flows || 0);
+            const badgeMitigados = flujosMitigados > 0
+                ? `<div class="mt-1"><span class="badge bg-success-subtle text-success border border-success-subtle" title="Ráfagas de ataque posteriores interceptadas y descartadas por la cuarentena activa"><i class="bi bi-shield-fill-check me-1"></i>${flujosMitigados} flujos neutralizados</span></div>`
+                : '';
 
             const htmlExpiracion = esPermanente
                 ? `<span class="permanent-pill" title="Bloqueo indefinido hasta que el operador presione Desbloquear IP">
@@ -133,6 +137,7 @@
                 <tr>
                     <td class="fw-bold text-danger">
                         <i class="bi bi-slash-circle-fill me-1"></i>${ip}
+                        ${badgeMitigados}
                     </td>
                     <td><code>${mac}</code></td>
                     <td>${ident}</td>
