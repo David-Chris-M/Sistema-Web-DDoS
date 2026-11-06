@@ -937,10 +937,15 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
         ms_pipeline=tiempos_pipeline,
     )
     if _modulo_soar_activo:
+        ips_despachadas_lote: set[str] = set()
         for fila_atq, reg_atq in zip(filas_bd, registros):
             if fila_atq["is_attack"]:
+                ip_cand = str(fila_atq["src_ip"])
+                if ip_cand in ips_despachadas_lote:
+                    continue
+                ips_despachadas_lote.add(ip_cand)
                 _disparar_investigacion_soar_asincrona(
-                    ip_atacante=fila_atq["src_ip"],
+                    ip_atacante=ip_cand,
                     ip_destino=fila_atq["dst_ip"],
                     protocolo=fila_atq["protocol"],
                     confianza=fila_atq["confidence_percentage"],
@@ -950,6 +955,8 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
                     ttl_avg=reg_atq.ttl_avg,
                     ttl_std=reg_atq.ttl_std,
                 )
+                if len(ips_despachadas_lote) >= 3:
+                    break
     return paquetes_telemetria
 
 
@@ -3159,6 +3166,16 @@ async def _ejecutar_pipeline_5_pasos_soar(
     return evento
 
 
+_semaforo_soar_background = asyncio.Semaphore(2)
+
+
+async def _ejecutar_soar_con_semaforo(**kwargs) -> None:
+    async with _semaforo_soar_background:
+        if not _modulo_soar_activo:
+            return
+        await _ejecutar_pipeline_5_pasos_soar(**kwargs)
+
+
 def _disparar_investigacion_soar_asincrona(
     ip_atacante: str,
     ip_destino: str,
@@ -3184,7 +3201,7 @@ def _disparar_investigacion_soar_asincrona(
     try:
         bucle = asyncio.get_running_loop()
         bucle.create_task(
-            _ejecutar_pipeline_5_pasos_soar(
+            _ejecutar_soar_con_semaforo(
                 ip_atacante=ip_atacante,
                 ip_destino=ip_destino,
                 protocolo=protocolo,

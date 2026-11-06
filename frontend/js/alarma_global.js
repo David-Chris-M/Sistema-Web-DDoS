@@ -627,11 +627,18 @@
                 oscBajo.start(t);
                 oscBajo.stop(t + 0.45);
 
-                if (temporizadorVoz) clearTimeout(temporizadorVoz);
-                temporizadorVoz = setTimeout(() => {
+                if (temporizadorVoz) {
+                    clearTimeout(temporizadorVoz);
                     temporizadorVoz = null;
+                }
+                if (document.hidden) {
                     emitirVozEspanol(0, protocoloEfectivo);
-                }, RETARDO_ENTRADA_VOZ_MS);
+                } else {
+                    temporizadorVoz = setTimeout(() => {
+                        temporizadorVoz = null;
+                        emitirVozEspanol(0, protocoloEfectivo);
+                    }, RETARDO_ENTRADA_VOZ_MS);
+                }
 
             } else if (modoAlerta === 'radar') {
                 const osc1 = contextoAudio.createOscillator();
