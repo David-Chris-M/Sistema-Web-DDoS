@@ -122,12 +122,22 @@
         .countdown-pill {
             font-family: 'Courier New', Courier, monospace;
             font-weight: 700;
-            font-size: 0.9rem;
+            font-size: 0.86rem;
             padding: 4px 10px;
             border-radius: 8px;
             background: rgba(239, 68, 68, 0.12);
             color: #dc2626;
             border: 1px solid rgba(239, 68, 68, 0.3);
+        }
+
+        .permanent-pill {
+            font-weight: 700;
+            font-size: 0.8rem;
+            padding: 4px 10px;
+            border-radius: 8px;
+            background: rgba(124, 58, 237, 0.14);
+            color: #6d28d9;
+            border: 1px solid rgba(124, 58, 237, 0.35);
         }
     </style>
     <script>
@@ -209,18 +219,21 @@
                 <span class="status-soar">
                     <i class="bi bi-shield-shaded"></i> CENTRO DE MITIGACIÓN SOAR / IPS
                 </span>
-                <span class="text-muted small d-none d-lg-inline">
-                    Investigación Automatizada de 5 Pasos y Cuarentena en Firewall con 4 Candados (NIST SP 800-94)
+                <span class="text-muted small d-none d-xl-inline">
+                    Investigación Forense de 5 Pasos, Detector OUI/VM/VPS y Mitigación HIPS + Perimetral (NIST SP 800-94)
                 </span>
             </div>
 
-            <div class="d-flex align-items-center gap-3">
-                <div class="form-check form-switch mb-0 d-flex align-items-center gap-2">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <div class="form-check form-switch mb-0 d-flex align-items-center gap-2 me-1">
                     <input class="form-check-input" type="checkbox" id="switchAutobloqueoIps" checked>
                     <label class="form-check-label small fw-semibold" for="switchAutobloqueoIps">
-                        Autobloqueo Inteligente IPS
+                        Autobloqueo Inteligente IPS (15m)
                     </label>
                 </div>
+                <button class="btn btn-sm btn-outline-info rounded-pill px-3 fw-semibold" data-bs-toggle="modal" data-bs-target="#modalRouterEdl">
+                    <i class="bi bi-router-fill me-1"></i> Conectar Router de Red (EDL MikroTik / pfSense / FortiGate)
+                </button>
                 <button class="btn btn-sm btn-outline-primary rounded-pill px-3 fw-semibold" onclick="cargarDashboardSoar()">
                     <i class="bi bi-arrow-clockwise me-1"></i> Actualizar
                 </button>
@@ -250,7 +263,7 @@
                         <div>
                             <div class="text-muted small fw-semibold">Incidentes Analizados (5 Pasos)</div>
                             <h3 class="fw-bold mb-0 mt-1 text-primary" id="kpiIncidentesSoar">0</h3>
-                            <small class="text-secondary">Correlación TTL + ARP + SANS</small>
+                            <small class="text-secondary">TTL + OUI/VM/NAT + VPS/SANS</small>
                         </div>
                         <span class="badge bg-primary-subtle text-primary p-2 rounded-3"><i class="bi bi-diagram-3 fs-5"></i></span>
                     </div>
@@ -260,9 +273,9 @@
                 <div class="kpi-card h-100">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                            <div class="text-muted small fw-semibold">Candado 1 (Lista Inmutable)</div>
+                            <div class="text-muted small fw-semibold">Candado 1 (Inmutable + Sesiones)</div>
                             <h6 class="fw-bold mb-0 mt-2 text-success" id="kpiGatewayProtegido">Gateway Protegido</h6>
-                            <small class="text-secondary" id="subKpiCandado1">Servidor, Router, DNS y CDNs</small>
+                            <small class="text-secondary" id="subKpiCandado1">Host, Router, DNS y Sesiones Salientes</small>
                         </div>
                         <span class="badge bg-success-subtle text-success p-2 rounded-3"><i class="bi bi-shield-lock fs-5"></i></span>
                     </div>
@@ -272,9 +285,9 @@
                 <div class="kpi-card h-100">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                            <div class="text-muted small fw-semibold">Candado 3 (Expiración TTL)</div>
-                            <h3 class="fw-bold mb-0 mt-1 text-warning">15:00 <small class="fs-6">min</small></h3>
-                            <small class="text-secondary">Purga automática garantizada</small>
+                            <div class="text-muted small fw-semibold">Régimen de Cuarentena</div>
+                            <h6 class="fw-bold mb-0 mt-2 text-warning">Manual: Permanente ∞</h6>
+                            <small class="text-secondary">Automático IPS: 15:00 min (Candado 3)</small>
                         </div>
                         <span class="badge bg-warning-subtle text-warning p-2 rounded-3"><i class="bi bi-hourglass-split fs-5"></i></span>
                     </div>
@@ -289,11 +302,16 @@
                     <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                         <div>
                             <h6 class="fw-bold mb-0 text-dark">
-                                <i class="bi bi-fire text-danger me-1"></i> Tabla de Cuarentena Activa en Firewall (Candado 3 — TTL 15 Minutos)
+                                <i class="bi bi-fire text-danger me-1"></i> Tabla de Cuarentena Activa en Firewall y Feed Perimetral EDL
                             </h6>
-                            <small class="text-muted">Lista en tiempo real de IPs/MACs bloqueadas con cuenta regresiva y desbloqueo en 1 clic</small>
+                            <small class="text-muted">Muestra claramente si una regla es <strong>Permanente (Hasta desbloqueo manual)</strong> o <strong>Cuenta regresiva 15m (IPS)</strong></small>
                         </div>
-                        <span class="badge bg-danger-subtle text-danger fw-semibold" id="badgeTotalCuarentena">0 reglas activas</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <a href="/api/soar/blocklist.txt" target="_blank" class="btn btn-sm btn-outline-dark py-0 px-2 small">
+                                <i class="bi bi-file-earmark-code me-1"></i>/api/soar/blocklist.txt
+                            </a>
+                            <span class="badge bg-danger-subtle text-danger fw-semibold" id="badgeTotalCuarentena">0 reglas activas</span>
+                        </div>
                     </div>
 
                     <div class="table-responsive">
@@ -302,9 +320,9 @@
                                 <tr>
                                     <th>IP Bloqueada</th>
                                     <th>MAC Física (LAN)</th>
-                                    <th>Identidad (Hostname / ISP / SANS)</th>
+                                    <th>Naturaleza e Identidad (Físico / VM / VPS)</th>
                                     <th>Regla Firewall (netsh)</th>
-                                    <th>Expira en (TTL)</th>
+                                    <th>Modalidad / Expiración</th>
                                     <th class="text-end">Acción Rápida</th>
                                 </tr>
                             </thead>
@@ -327,16 +345,16 @@
                     <h6 class="fw-bold mb-1 text-dark">
                         <i class="bi bi-lightning-charge-fill text-warning me-1"></i> Aislar IP Manualmente en 1 Clic
                     </h6>
-                    <p class="small text-muted mb-3">
-                        Investiga en los 5 pasos y aplica cuarentena de 15 minutos en Windows Firewall (protegido por Candado 1).
+                    <p class="small text-muted mb-2">
+                        Permite bloquear de forma <strong>Permanente</strong> ("Hasta desbloqueo manual") por defecto, o temporal por <strong>15 min</strong>.
                     </p>
 
                     <div class="mb-2">
-                        <label class="form-label small fw-semibold">Dirección IP a Bloquear</label>
+                        <label class="form-label small fw-semibold mb-1">Dirección IP y Protocolo</label>
                         <div class="input-group input-group-sm">
                             <span class="input-group-text"><i class="bi bi-hdd-network"></i></span>
                             <input type="text" class="form-control" id="inputIpManualBloquear" placeholder="Ej: 203.0.113.50 o 192.168.18.99">
-                            <select class="form-select" id="selectProtoManualBloquear" style="max-width: 90px;">
+                            <select class="form-select" id="selectProtoManualBloquear" style="max-width: 86px;">
                                 <option value="TCP">TCP</option>
                                 <option value="UDP">UDP</option>
                                 <option value="ICMP">ICMP</option>
@@ -344,15 +362,23 @@
                         </div>
                     </div>
 
+                    <div class="mb-2">
+                        <label class="form-label small fw-semibold mb-1">Duración del Bloqueo Manual</label>
+                        <select class="form-select form-select-sm" id="selectDuracionManualBloquear">
+                            <option value="permanent" selected>Permanente (Hasta desbloqueo manual)</option>
+                            <option value="15m">Temporal (15 min - Candado 3)</option>
+                        </select>
+                    </div>
+
                     <button class="btn btn-sm btn-danger w-100 rounded-pill fw-semibold py-2 mt-1 mb-3 shadow-sm" id="btnBloquearIpManual" onclick="bloquearIpManualInput()">
-                        <i class="bi bi-shield-fill-x me-1"></i> Investigar y Bloquear IP (15 min)
+                        <i class="bi bi-shield-fill-x me-1"></i> Investigar y Bloquear IP
                     </button>
 
                     <div class="p-2 rounded-3 border bg-light small">
                         <div class="fw-bold text-dark mb-1">
-                            <i class="bi bi-lock-fill text-success me-1"></i> Candado 1: IPs Inmutables Protegidas
+                            <i class="bi bi-lock-fill text-success me-1"></i> Candado 1: Protección Fija + Dinámica
                         </div>
-                        <div class="text-secondary" style="font-size: 0.78rem;" id="listaResumenCandado1">
+                        <div class="text-secondary" style="font-size: 0.76rem;" id="listaResumenCandado1">
                             Cargando lista de protección...
                         </div>
                     </div>
@@ -368,7 +394,7 @@
                         <i class="bi bi-diagram-3-fill text-info me-1"></i> Flujo Visual de los 5 Pasos de TI por Ataque Detectado
                     </h6>
                     <small class="text-muted">
-                        (1) Anti-Spoofing TTL RFC 4732 • (2) MAC + Hostname ARP LAN • (3) País + ISP + ASN WAN • (4) Reputación SANS ISC DShield • (5) Mitigación Firewall
+                        (1) Anti-Spoofing TTL RFC 4732 • (2) OUI/VM Puente/LAA + Huella TTL NAT LAN • (3) País + ISP + Clasificador VPS/Cloud WAN • (4) SANS ISC DShield • (5) Mitigación Firewall
                     </small>
                 </div>
                 <span class="badge bg-info-subtle text-info fw-semibold">Pipeline Asíncrono No-Bloqueante</span>
@@ -384,8 +410,76 @@
 
     </div>
 
+    <!-- Modal: Conectar Router de Red (EDL MikroTik / pfSense / FortiGate) -->
+    <div class="modal fade" id="modalRouterEdl" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title fw-bold">
+                        <i class="bi bi-router-fill text-info me-2"></i>Conectar Router de Red Empresarial (EDL MikroTik / pfSense / FortiGate)
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Cerrar"></button>
+                </div>
+                <div class="modal-body small">
+                    <p class="text-secondary mb-3">
+                        Además de proteger este servidor localmente mediante <code>netsh advfirewall</code>, CyberShield publica en tiempo real un <strong>Feed Dinámico de Lista Negra Perimetral (EDL)</strong> en texto plano (una IP por línea) para que el Router o Firewall principal corte el tráfico del atacante en toda la red de la empresa (Switches, VLANs y otros servidores).
+                    </p>
+
+                    <div class="p-3 rounded-3 border bg-light mb-3">
+                        <label class="form-label fw-bold text-dark mb-1">
+                            <i class="bi bi-link-45deg text-primary me-1"></i>URL en Vivo del Feed Perimetral (Texto Plano):
+                        </label>
+                        <div class="input-group input-group-sm">
+                            <input type="text" class="form-control font-monospace fw-bold" id="inputUrlBlocklistEdl" readonly value="http://127.0.0.1:8000/api/soar/blocklist.txt">
+                            <button class="btn btn-primary fw-semibold" type="button" onclick="copiarUrlBlocklistEdl()">
+                                <i class="bi bi-clipboard me-1"></i> Copiar URL
+                            </button>
+                            <a href="/api/soar/blocklist.txt" target="_blank" class="btn btn-outline-secondary fw-semibold">
+                                <i class="bi bi-box-arrow-up-right me-1"></i> Abrir Feed
+                            </a>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <div class="fw-bold text-dark mb-1">
+                            <i class="bi bi-terminal-fill text-danger me-1"></i>1. Comando listo para Router MikroTik (RouterOS v6 / v7):
+                        </div>
+                        <pre class="p-2 rounded bg-dark text-light font-monospace mb-1" style="font-size: 0.76rem; white-space: pre-wrap;" id="preComandoMikrotik">/ip firewall filter add chain=forward src-address-list=CyberShield_Block action=drop comment="CyberShield SOAR IPS Perimetral" place-before=0
+/system scheduler add name="Sync_CyberShield_SOAR" interval=30s on-event="/tool fetch url=\"http://192.168.18.10:8000/api/soar/blocklist.txt\" dst-path=cybershield.txt; :foreach ip in=[:toarray [/file get cybershield.txt contents]] do={ /ip firewall address-list add list=CyberShield_Block address=\$ip timeout=15m }"</pre>
+                    </div>
+
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <div class="p-2 rounded border h-100">
+                                <div class="fw-bold text-dark mb-1">
+                                    <i class="bi bi-shield-check text-primary me-1"></i>2. pfSense / OPNsense (URL Table Alias):
+                                </div>
+                                <div class="text-secondary" style="font-size: 0.76rem;">
+                                    Ir a <code>Firewall &rarr; Aliases &rarr; URLs</code>, elegir tipo <strong>URL Table (IPs)</strong>, pegar la URL del Feed con refresco cada 1 min y asociar el Alias a una regla <code>Block</code> en la interfaz WAN/LAN.
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="p-2 rounded border h-100">
+                                <div class="fw-bold text-dark mb-1">
+                                    <i class="bi bi-bricks text-warning me-1"></i>3. Fortinet FortiGate (External Threat Feed):
+                                </div>
+                                <div class="text-secondary" style="font-size: 0.76rem;">
+                                    Ir a <code>Security Fabric &rarr; External Connectors &rarr; Create New &rarr; IP Address Threat Feed</code>, ingresar la URL en vivo y usarla como origen <code>Deny</code> en <code>Firewall Policy</code>.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary btn-sm" data-bs-dismiss="modal">Cerrar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/frontend/js/alarma_global.js?v=15"></script>
-    <script src="/frontend/js/soar.js?v=15"></script>
+    <script src="/frontend/js/alarma_global.js?v=16"></script>
+    <script src="/frontend/js/soar.js?v=16"></script>
 </body>
 </html>

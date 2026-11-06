@@ -31,7 +31,7 @@ from fastapi import (
 import hashlib
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, IPvAnyAddress
 from sqlalchemy import case, delete, func, insert, select
@@ -100,6 +100,12 @@ class RegistroFlujo(BaseModel):
     duration_ms: float = Field(default=0.0, ge=0, allow_inf_nan=False, alias="duration_ms")
     total_bytes: int = Field(default=0, ge=0, alias="total_bytes")
     exported_at: Optional[float] = Field(default=None, description="Marca temporal de exportación en el sensor")
+    ttl_avg: Optional[float] = Field(default=None, description="TTL promedio observado en paquetes IP del flujo")
+    ttl_std: Optional[float] = Field(default=None, description="Desviación estándar de TTL en paquetes IP del flujo")
+    sesion_local_confirmada: Optional[bool] = Field(
+        default=None,
+        description="Indica si el flujo pertenece a una sesión saliente legítima confirmada por el host local",
+    )
 
 
 class LoteRegistrosFlujo(BaseModel):
@@ -527,6 +533,7 @@ DBWriter = EscritorBaseDatos
 _umbral_decision_activo: float = float(configuracion.umbral_decision)
 _ventana_rafaga_sensor: deque = deque(maxlen=256)
 _conntrack_sesiones_locales: "OrderedDict[tuple, float]" = OrderedDict()
+_ips_remotas_sesion_confirmada: "OrderedDict[str, float]" = OrderedDict()
 _historial_segundos_throughput: dict[int, dict[str, int]] = {}
 VENTANA_CORRELACION_SEG: float = 5.0
 MIN_FLUJOS_RAFAGA_DDOS: int = 2
@@ -535,6 +542,21 @@ TTL_CONNTRACK_SEG: float = 300.0
 _modulo_soar_activo: bool = False
 _autobloqueo_soar_activo: bool = True
 _cuarentena_activa: "OrderedDict[str, dict]" = OrderedDict()
+
+
+def _registrar_ip_sesion_saliente_confirmada(ip_remota: str, ahora_mono: float) -> None:
+    ip_limpia = (ip_remota or "").strip()
+    if not ip_limpia or ip_limpia in _IPS_PROPIAS_SERVIDOR or ip_limpia in ("127.0.0.1", "::1"):
+        return
+    while _ips_remotas_sesion_confirmada:
+        _, t_antiguo = next(iter(_ips_remotas_sesion_confirmada.items()))
+        if (ahora_mono - t_antiguo) <= TTL_CONNTRACK_SEG:
+            break
+        _ips_remotas_sesion_confirmada.popitem(last=False)
+    _ips_remotas_sesion_confirmada[ip_limpia] = ahora_mono
+    _ips_remotas_sesion_confirmada.move_to_end(ip_limpia)
+    while len(_ips_remotas_sesion_confirmada) > 4096:
+        _ips_remotas_sesion_confirmada.popitem(last=False)
 
 REDES_CDN_CLOUD_CONOCIDAS = (
     ipaddress.ip_network("104.16.0.0/12"),   # Cloudflare
@@ -676,6 +698,8 @@ def _es_trafico_solicitado_conntrack(r: RegistroFlujo, ahora_mono: float) -> boo
     dst_es_externa = not (dst_es_local or ip_dst.is_loopback or ip_dst.is_multicast or ip_dst.is_unspecified)
 
     if src_es_local and dst_es_externa:
+        if r.sesion_local_confirmada:
+            _registrar_ip_sesion_saliente_confirmada(str(ip_dst), ahora_mono)
         es_bidireccional_establecida = (
             paq_ida >= 1.0
             and paq_vuelta >= 1.0
@@ -700,9 +724,12 @@ def _es_trafico_solicitado_conntrack(r: RegistroFlujo, ahora_mono: float) -> boo
             _conntrack_sesiones_locales.move_to_end(clave_conntrack)
             while len(_conntrack_sesiones_locales) > MAX_SESIONES_CONNTRACK:
                 _conntrack_sesiones_locales.popitem(last=False)
+            _registrar_ip_sesion_saliente_confirmada(str(ip_dst), ahora_mono)
             return True
 
     if src_es_externa and dst_es_local:
+        if r.sesion_local_confirmada:
+            _registrar_ip_sesion_saliente_confirmada(str(ip_src), ahora_mono)
         es_multimedia_udp_entrante = (
             r.protocol == "UDP"
             and _es_puerto_multimedia_o_web_udp(puerto_origen)
@@ -714,6 +741,7 @@ def _es_trafico_solicitado_conntrack(r: RegistroFlujo, ahora_mono: float) -> boo
             _conntrack_sesiones_locales.move_to_end(clave_conntrack)
             while len(_conntrack_sesiones_locales) > MAX_SESIONES_CONNTRACK:
                 _conntrack_sesiones_locales.popitem(last=False)
+            _registrar_ip_sesion_saliente_confirmada(str(ip_src), ahora_mono)
             return True
 
         if clave_conntrack in _conntrack_sesiones_locales:
@@ -725,6 +753,7 @@ def _es_trafico_solicitado_conntrack(r: RegistroFlujo, ahora_mono: float) -> boo
                 return False
             _conntrack_sesiones_locales[clave_conntrack] = ahora_mono
             _conntrack_sesiones_locales.move_to_end(clave_conntrack)
+            _registrar_ip_sesion_saliente_confirmada(str(ip_src), ahora_mono)
             return True
 
     return False
@@ -918,6 +947,8 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
                     features=reg_atq.features,
                     origen_evento=origen,
                     permitir_autobloqueo=True,
+                    ttl_avg=reg_atq.ttl_avg,
+                    ttl_std=reg_atq.ttl_std,
                 )
     return paquetes_telemetria
 
@@ -2249,20 +2280,74 @@ COOLDOWN_INVESTIGACION_IP_SEG: float = 8.0
 
 IPS_DNS_CRITICOS = {"8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9", "208.67.222.222"}
 
+MAPA_OUI_VM_BRIDGED = {
+    "08-00-27": "Oracle VirtualBox",
+    "0A-00-27": "Oracle VirtualBox",
+    "00-0C-29": "VMware Workstation/ESXi",
+    "00-50-56": "VMware Workstation/ESXi",
+    "00-05-69": "VMware Workstation/ESXi",
+    "00-1C-14": "VMware Workstation/ESXi",
+    "00-15-5D": "Microsoft Hyper-V / WSL2",
+    "52-54-00": "KVM / QEMU",
+    "02-42-AC": "Docker Container",
+}
+
 MAPA_OUI_FABRICANTES = {
     "88-D7-F6": "ASUSTek Computer",
-    "00-E0-4C": "Realtek Semiconductor",
-    "00-1A-2B": "Ayecom Technology",
     "3C-7C-3F": "ASUSTek Computer",
-    "D8-BB-C1": "Micro-Star INT'L (MSI)",
     "F0-2F-74": "ASUSTek Computer",
+    "70-4D-7B": "ASUSTek Computer",
+    "04-D4-C4": "ASUSTek Computer",
+    "00-E0-4C": "Realtek Semiconductor",
+    "54-E1-AD": "Lenovo / Realtek",
+    "E8-6A-64": "Lenovo",
+    "98-FA-9B": "Lenovo",
+    "00-1A-2B": "Ayecom Technology",
+    "D8-BB-C1": "Micro-Star INT'L (MSI)",
+    "00-D8-61": "Micro-Star INT'L (MSI)",
     "AC-82-47": "TP-Link Technologies",
     "50-C7-BF": "TP-Link Technologies",
-    "70-4D-7B": "ASUSTek Computer",
-    "00-50-56": "VMware Virtual NIC",
-    "00-15-5D": "Microsoft Hyper-V",
-    "08-00-27": "Oracle VirtualBox",
+    "98-DA-C4": "TP-Link Technologies",
+    "B0-BE-76": "TP-Link Technologies",
+    "00-1B-21": "Intel Corporate",
+    "3C-97-0E": "Intel Corporate",
+    "8C-8D-28": "Intel Corporate",
+    "A4-34-D9": "Intel Corporate",
+    "DC-FB-48": "Intel Corporate",
+    "F8-75-A4": "Dell Inc.",
+    "18-66-DA": "Dell Inc.",
+    "3C-D9-2B": "Hewlett Packard (HP)",
+    "B4-B5-2F": "Hewlett Packard (HP)",
+    "F0-18-98": "Apple Inc.",
+    "BC-D0-74": "Apple Inc.",
+    "28-39-5E": "Samsung Electronics",
 }
+
+PALABRAS_CLAVE_VPS_DATACENTER = (
+    "digitalocean",
+    "amazon",
+    "aws",
+    "hetzner",
+    "ovh",
+    "vultr",
+    "choopa",
+    "linode",
+    "akamai",
+    "azure",
+    "microsoft",
+    "google cloud",
+    "google llc",
+    "contabo",
+    "oracle",
+    "alibaba",
+    "tencent",
+    "leaseweb",
+    "hostinger",
+    "upcloud",
+    "kamatera",
+    "datacamp",
+    "m247",
+)
 
 _gateways_detectados: set[str] = set()
 _gateway_principal: str = "192.168.18.1"
@@ -2325,9 +2410,34 @@ def _verificar_clave_maestra_soar(clave_ingresada: str) -> bool:
     return hmac.compare_digest(hash_recibido, hash_esperado)
 
 
+def _ip_tiene_sesion_saliente_confirmada(ip_limpia: str) -> bool:
+    ahora_mono = time.monotonic()
+    while _ips_remotas_sesion_confirmada:
+        _, t_ant = next(iter(_ips_remotas_sesion_confirmada.items()))
+        if (ahora_mono - t_ant) <= TTL_CONNTRACK_SEG:
+            break
+        _ips_remotas_sesion_confirmada.popitem(last=False)
+
+    if ip_limpia in _ips_remotas_sesion_confirmada:
+        return True
+
+    for clave_ct, t_visto in list(_conntrack_sesiones_locales.items()):
+        if (ahora_mono - t_visto) <= TTL_CONNTRACK_SEG and isinstance(clave_ct, tuple) and len(clave_ct) >= 2:
+            ext_a, ext_b = clave_ct[0], clave_ct[1]
+            if isinstance(ext_a, tuple) and isinstance(ext_b, tuple):
+                if ext_a[0] == ip_limpia or ext_b[0] == ip_limpia:
+                    return True
+    return False
+
+
 def _obtener_resumen_candado1() -> dict:
     if not _gateways_detectados:
         _inicializar_gateways_candado1()
+    ahora_mono = time.monotonic()
+    activas_salientes = [
+        ip_k for ip_k, t_v in _ips_remotas_sesion_confirmada.items()
+        if (ahora_mono - t_v) <= TTL_CONNTRACK_SEG
+    ]
     return {
         "local_ips": sorted(_IPS_PROPIAS_SERVIDOR),
         "gateways": sorted(_gateways_detectados),
@@ -2335,11 +2445,14 @@ def _obtener_resumen_candado1() -> dict:
         "loopback": ["127.0.0.1", "::1"],
         "dns_servers": sorted(IPS_DNS_CRITICOS),
         "cdn_cidrs": [str(r) for r in REDES_CDN_CLOUD_CONOCIDAS],
+        "dynamic_outbound_protection": True,
+        "active_outbound_sessions_count": len(activas_salientes),
+        "active_outbound_sample": activas_salientes[-5:],
     }
 
 
 def _evaluar_candado1_ip_protegida(ip_str: str) -> tuple[bool, str]:
-    """Candado 1: Lista Inmutable Protegida (Servidor local, Gateway/Router, Loopback, DNS, CDNs)."""
+    """Candado 1: Lista Inmutable Protegida + Protección Dinámica de Sesiones Salientes Confirmadas."""
     if not _gateways_detectados:
         _inicializar_gateways_candado1()
     ip_limpia = (ip_str or "").strip()
@@ -2364,8 +2477,13 @@ def _evaluar_candado1_ip_protegida(ip_str: str) -> tuple[bool, str]:
         return True, f"Candado 1 Activo: Rango CIDR de CDN Legítimo Cloudflare/Google/Zoom ({ip_limpia}) protegido"
     if ip_obj.is_multicast or ip_obj.is_link_local or ip_obj.is_unspecified or ip_limpia == "255.255.255.255":
         return True, f"Candado 1 Activo: Dirección Reservada de Red ({ip_limpia}) protegida"
+    if _ip_tiene_sesion_saliente_confirmada(ip_limpia):
+        return (
+            True,
+            f"Candado 1 Activo: Servidor con Sesión Saliente Legítima Confirmada ({ip_limpia}) protegido contra bloqueo por paquetes falsificados",
+        )
 
-    return False, "IP verificada (No pertenece a la Lista Inmutable Protegida)"
+    return False, "IP verificada (No pertenece a la Lista Inmutable ni a sesiones salientes activas)"
 
 
 def _nombre_regla_firewall_ip(ip_str: str) -> str:
@@ -2390,9 +2508,14 @@ def _ejecutar_netsh_sincrono(argumentos: List[str]) -> tuple[bool, str]:
         return False, str(exc)[:160]
 
 
-def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str) -> tuple[bool, str, str]:
+def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool = False) -> tuple[bool, str, str]:
     nombre_regla = _nombre_regla_firewall_ip(ip_str)
     _ejecutar_netsh_sincrono(["delete", "rule", f"name={nombre_regla}"])
+    desc = (
+        "CyberShield SOAR IPS Bloqueo Manual Permanente"
+        if es_permanente
+        else "CyberShield SOAR IPS Cuarentena Temporal 15m"
+    )
     exito, detalle = _ejecutar_netsh_sincrono([
         "add", "rule",
         f"name={nombre_regla}",
@@ -2401,7 +2524,7 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str) -> tuple[bool, str, s
         f"remoteip={ip_str}",
         "enable=yes",
         "profile=any",
-        "description=CyberShield SOAR IPS Cuarentena Temporal 15m",
+        f"description={desc}",
     ])
     return exito, nombre_regla, detalle
 
@@ -2444,6 +2567,8 @@ def _diagnosticar_paso1_ttl_antispoofing(
     ip_str: str,
     protocolo: str,
     features: Optional[List[float]] = None,
+    ttl_avg_sensor: Optional[float] = None,
+    ttl_std_sensor: Optional[float] = None,
 ) -> dict:
     """Paso 1 Automatizado de TI: Diagnóstico Anti-Spoofing por consistencia de TTL (RFC 4732)."""
     es_privada = False
@@ -2454,10 +2579,14 @@ def _diagnosticar_paso1_ttl_antispoofing(
     except ValueError:
         pass
 
-    ttl_base = 128 if es_privada else 56
-    ttl_std = 0.0 if es_privada else 0.4
+    ttl_base = float(ttl_avg_sensor) if (ttl_avg_sensor is not None and ttl_avg_sensor > 0) else (128.0 if es_privada else 56.0)
+    ttl_std = float(ttl_std_sensor) if (ttl_std_sensor is not None and ttl_std_sensor >= 0) else (0.0 if es_privada else 0.4)
     sospecha_spoofing = False
-    motivo_ttl = "Ruta de red consistente (σ ≤ 1.0) — Origen verificado"
+    motivo_ttl = f"Ruta de red consistente (TTL≈{ttl_base:.0f}, σ={ttl_std:.2f} ≤ 1.0) — Origen verificado"
+
+    if ttl_std_sensor is not None and ttl_std_sensor > 1.0:
+        sospecha_spoofing = True
+        motivo_ttl = f"Alerta RFC 4732: Saltos erráticos de TTL (TTL≈{ttl_base:.0f}, σ={ttl_std:.2f} > 1.0) — Alta sospecha de IP Spoofing"
 
     if features and len(features) >= 70:
         paq_ida = float(features[4])
@@ -2467,33 +2596,82 @@ def _diagnosticar_paso1_ttl_antispoofing(
         ack_cnt = float(features[49])
         win_ida = float(features[68])
 
-        # Detección de inundación SYN pura sin saludo completado y dispersión errática (RFC 4732)
         if protocolo == "TCP" and syn_cnt >= 20.0 and ack_cnt == 0.0 and paq_vuelta == 0.0 and win_ida <= 512.0:
             sospecha_spoofing = True
-            ttl_std = 6.8
+            if ttl_std <= 1.0:
+                ttl_std = 6.8
             motivo_ttl = "Alerta RFC 4732: Inundación SYN pura sin Handshake (Alta sospecha de IP Spoofing)"
         elif iat_std > 250000.0 and paq_vuelta == 0.0 and syn_cnt > 5.0 and not es_privada:
             sospecha_spoofing = True
-            ttl_std = 4.2
+            if ttl_std <= 1.0:
+                ttl_std = 4.2
             motivo_ttl = "Alerta RFC 4732: Saltos/tiempos erráticos sin retorno (Posible IP Spoofing)"
-        else:
-            ttl_std = 0.0 if es_privada else round(min(0.8, (iat_std / 1e6) if iat_std > 0 else 0.2), 2)
-            motivo_ttl = f"TTL Consistente (~{ttl_base}, σ={ttl_std}) — Ruta estable verificada"
+        elif not sospecha_spoofing:
+            if ttl_std_sensor is None:
+                ttl_std = 0.0 if es_privada else round(min(0.8, (iat_std / 1e6) if iat_std > 0 else 0.2), 2)
+            motivo_ttl = f"TTL Consistente (~{ttl_base:.0f}, σ={ttl_std}) — Ruta estable verificada"
 
     return {
         "step": 1,
         "title": "Anti-Spoofing TTL (RFC 4732)",
-        "ttl_estimated": ttl_base,
-        "ttl_std": ttl_std,
+        "ttl_estimated": round(ttl_base, 1),
+        "ttl_std": round(ttl_std, 2),
         "consistent": not sospecha_spoofing,
         "spoofing_suspect": sospecha_spoofing,
-        "badge": "Posible Spoofing" if sospecha_spoofing else f"TTL Estable (σ={ttl_std})",
+        "badge": "Posible Spoofing" if sospecha_spoofing else f"TTL ~{ttl_base:.0f} (σ={ttl_std:.2f})",
         "detail": motivo_ttl,
     }
 
 
-def _consultar_paso2_arp_lan_sincrono(ip_str: str) -> dict:
-    """Paso 2 Automatizado de TI: Dirección MAC física y Hostname vía tabla ARP (Red Local LAN)."""
+def _clasificar_naturaleza_mac_y_ttl(mac_str: str, hostname: str, ttl_observado: Optional[float]) -> tuple[str, str, Optional[str]]:
+    """
+    Inspecciona el prefijo OUI de la dirección MAC y cruza con el TTL del atacante para distinguir:
+    1. Máquina Virtual en Modo Puente (08:00:27/0A:00:27 VirtualBox, 00:0C:29/00:50:56/00:05:69 VMware,
+       00:15:5D Hyper-V/WSL2, 52:54:00 KVM/QEMU, 02:42:AC Docker).
+    2. MAC Administrada Localmente (LAA) (segundo dígito hex 2, 6, A, E -> "MAC Aleatoria Wi-Fi Móvil / LAA Spoofed").
+    3. Hardware Físico Real (Intel, Realtek, TP-Link, Asus, Lenovo, etc.).
+    4. Detección de VM oculta tras NAT por huella TTL (TTL 63, 64 o 127 en tarjeta física o host Windows).
+    """
+    mac_norm = (mac_str or "").strip().upper().replace(":", "-")
+    es_mac_valida = bool(re.match(r"^([0-9A-F]{2}-){5}[0-9A-F]{2}$", mac_norm))
+
+    fabricante = "Dispositivo LAN"
+    naturaleza = "Equipo LAN (Sin MAC en caché ARP)"
+    es_vm_bridged = False
+
+    if es_mac_valida:
+        prefijo_oui = mac_norm[:8]
+        segundo_digito_hex = mac_norm[1]
+
+        if prefijo_oui in MAPA_OUI_VM_BRIDGED:
+            hipervisor = MAPA_OUI_VM_BRIDGED[prefijo_oui]
+            fabricante = hipervisor
+            naturaleza = f"Máquina Virtual en Modo Puente ({hipervisor})"
+            es_vm_bridged = True
+        elif segundo_digito_hex in ("2", "6", "A", "E"):
+            fabricante = "MAC Localmente Administrada (IEEE 802 LAA)"
+            naturaleza = "MAC Aleatoria Wi-Fi Móvil / LAA Spoofed"
+        else:
+            fabricante = MAPA_OUI_FABRICANTES.get(prefijo_oui, "NIC Ethernet/Wi-Fi Estándar")
+            naturaleza = f"Hardware Físico Real ({fabricante})"
+
+    # Cruce de huella TTL para detectar VM oculta tras NAT o Subred (TTL 63, 64 o 127)
+    alerta_vm_nat = None
+    if ttl_observado is not None and ttl_observado > 0:
+        ttl_entero = int(round(float(ttl_observado)))
+        host_up = (hostname or "").upper()
+        parece_host_windows = any(
+            host_up.startswith(pref) for pref in ("DESKTOP-", "LAPTOP-", "WIN-", "PC-", "WORKSTATION-")
+        )
+        es_mac_fisica_o_windows = (not es_vm_bridged) and (es_mac_valida or parece_host_windows)
+        if es_mac_fisica_o_windows and ttl_entero in (63, 64, 127):
+            alerta_vm_nat = f"Posible VM Linux/Kali en Modo NAT o Subred (TTL={ttl_entero})"
+
+    return fabricante, naturaleza, alerta_vm_nat
+
+
+def _consultar_paso2_arp_lan_sincrono(ip_str: str, ttl_observado: Optional[float] = None) -> dict:
+    """Paso 2 Automatizado de TI: Dirección MAC física, Hostname, Naturaleza OUI/LAA/VM y cruce TTL (Red Local LAN)."""
     es_testbed = ip_str.startswith(("203.0.113.", "198.51.100.", "192.0.2."))
     try:
         ip_obj = ipaddress.ip_address(ip_str)
@@ -2504,24 +2682,26 @@ def _consultar_paso2_arp_lan_sincrono(ip_str: str) -> dict:
     if not es_lan:
         return {
             "step": 2,
-            "title": "Forense LAN (ARP / Hostname)",
+            "title": "Forense LAN (ARP / Hostname / OUI)",
             "applicable": False,
             "is_lan": False,
             "mac": "N/A (Red WAN)",
             "hostname": "N/A (Externo)",
             "vendor": "Externo WAN",
+            "device_nature": "No aplica (Tráfico Público WAN)",
+            "nat_vm_warning": None,
             "badge": "No aplica (IP WAN)",
-            "detail": "Origen fuera de la red local (se analiza en Paso 3 WAN)",
+            "detail": "Origen fuera de la red local (se analiza naturaleza VPS/ISP en Paso 3 WAN)",
         }
 
     ahora = time.monotonic()
-    en_cache = _cache_forense_lan.get(ip_str)
+    clave_cache = f"{ip_str}:{int(round(ttl_observado)) if ttl_observado else 0}"
+    en_cache = _cache_forense_lan.get(clave_cache)
     if en_cache and (ahora - en_cache[0]) < 300.0:
-        _cache_forense_lan.move_to_end(ip_str)
+        _cache_forense_lan.move_to_end(clave_cache)
         return en_cache[1]
 
     mac_detectada = "No registrada en caché ARP"
-    fabricante = "Dispositivo LAN"
     if os.name == "nt":
         try:
             proc = subprocess.run(
@@ -2534,8 +2714,6 @@ def _consultar_paso2_arp_lan_sincrono(ip_str: str) -> dict:
             coincidencia = re.search(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}", proc.stdout or "")
             if coincidencia:
                 mac_detectada = coincidencia.group(0).upper().replace(":", "-")
-                prefijo_oui = mac_detectada[:8]
-                fabricante = MAPA_OUI_FABRICANTES.get(prefijo_oui, "Adaptador Ethernet/Wi-Fi LAN")
         except Exception:
             pass
 
@@ -2550,27 +2728,43 @@ def _consultar_paso2_arp_lan_sincrono(ip_str: str) -> dict:
             hostname_detectado = "DESKTOP-3J2KD76"
             if mac_detectada.startswith("No "):
                 mac_detectada = "88-D7-F6-E2-2F-7A"
-                fabricante = "ASUSTek Computer"
+
+    fabricante, naturaleza_equipo, alerta_vm_nat = _clasificar_naturaleza_mac_y_ttl(
+        mac_detectada, hostname_detectado, ttl_observado
+    )
+
+    detalle_completo = f"MAC: {mac_detectada} | Host: {hostname_detectado} | Tipo: {naturaleza_equipo}"
+    if alerta_vm_nat:
+        detalle_completo += f" ⚠️ [{alerta_vm_nat}]"
 
     resultado = {
         "step": 2,
-        "title": "Forense LAN (ARP / Hostname)",
+        "title": "Forense LAN (ARP / Hostname / OUI)",
         "applicable": True,
         "is_lan": True,
         "mac": mac_detectada,
         "hostname": hostname_detectado,
         "vendor": fabricante,
-        "badge": f"{hostname_detectado} ({mac_detectada})",
-        "detail": f"MAC: {mac_detectada} ({fabricante}) | Host: {hostname_detectado}",
+        "device_nature": naturaleza_equipo,
+        "nat_vm_warning": alerta_vm_nat,
+        "badge": alerta_vm_nat if alerta_vm_nat else f"{naturaleza_equipo.split('(')[0].strip()} • {hostname_detectado}",
+        "detail": detalle_completo,
     }
-    _cache_forense_lan[ip_str] = (ahora, resultado)
+    _cache_forense_lan[clave_cache] = (ahora, resultado)
     while len(_cache_forense_lan) > MAX_CACHE_SOAR_ENTRADAS:
         _cache_forense_lan.popitem(last=False)
     return resultado
 
 
+def _clasificar_naturaleza_wan_isp_asn(isp_str: str, asn_str: str, org_str: str = "") -> str:
+    texto = f"{isp_str or ''} {asn_str or ''} {org_str or ''}".lower()
+    if any(palabra in texto for palabra in PALABRAS_CLAVE_VPS_DATACENTER):
+        return "Servidor VPS / Cloud Datacenter (Botnet)"
+    return "Conexión Residencial / Corporativa (ISP)"
+
+
 def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
-    """Paso 3 Automatizado de TI: País, Proveedor ISP y Código ASN para IPs públicas (WAN)."""
+    """Paso 3 Automatizado de TI: País, Proveedor ISP, ASN y Clasificación VPS/Cloud vs ISP Residencial."""
     es_testbed = ip_str.startswith(("203.0.113.", "198.51.100.", "192.0.2."))
     try:
         ip_obj = ipaddress.ip_address(ip_str)
@@ -2587,6 +2781,7 @@ def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
             "country": "Red Local (LAN)",
             "isp": "Subred Interna Pyme",
             "asn": "RFC 1918",
+            "attacker_type": "Host Interno LAN (Ver Paso 2)",
             "badge": "Red Local (RFC 1918)",
             "detail": "Dirección IP privada perteneciente a la red interna LAN",
         }
@@ -2600,8 +2795,9 @@ def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
             "country": "Red de Pruebas (RFC 5737)",
             "isp": "CyberShield Testbed Network",
             "asn": "AS64512 (TEST-NET-3)",
+            "attacker_type": "Simulador Académico / Testbed",
             "badge": "Testbed | AS64512",
-            "detail": "País: Testbed (RFC 5737) | ISP: CyberShield Sim | ASN: AS64512",
+            "detail": "País: Testbed (RFC 5737) | ISP: CyberShield Sim | Tipo: Simulador Académico / Testbed",
         }
 
     ahora = time.monotonic()
@@ -2612,6 +2808,7 @@ def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
 
     pais = "Desconocido"
     isp = "Proveedor WAN"
+    org = ""
     asn = "ASN No Identificado"
     try:
         req = urllib.request.Request(
@@ -2623,11 +2820,13 @@ def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
             if datos.get("status") == "success":
                 pais = datos.get("country") or "Externo"
                 isp = datos.get("isp") or datos.get("org") or "ISP Externo"
+                org = datos.get("org") or ""
                 asn_raw = datos.get("as") or ""
                 asn = asn_raw.split()[0] if asn_raw else "ASN-WAN"
     except Exception:
         pass
 
+    tipo_atacante = _clasificar_naturaleza_wan_isp_asn(isp, asn, org)
     resultado = {
         "step": 3,
         "title": "Inteligencia WAN (País / ISP / ASN)",
@@ -2636,8 +2835,9 @@ def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
         "country": pais,
         "isp": isp,
         "asn": asn,
-        "badge": f"{pais} | {asn}",
-        "detail": f"País: {pais} | ISP: {isp} | ASN: {asn}",
+        "attacker_type": tipo_atacante,
+        "badge": f"{pais} • { 'VPS / Cloud' if 'VPS' in tipo_atacante else 'ISP Residencial/Corp' }",
+        "detail": f"País: {pais} | ISP: {isp} ({asn}) | Naturaleza: {tipo_atacante}",
     }
     _cache_forense_wan[ip_str] = (ahora, resultado)
     while len(_cache_forense_wan) > MAX_CACHE_SOAR_ENTRADAS:
@@ -2726,19 +2926,21 @@ def _consultar_paso4_sans_isc_sincrono(ip_str: str) -> dict:
 
 
 async def _bucle_expiracion_cuarentena_soar() -> None:
-    """Candado 3: Bucle ligero que expira y elimina automáticamente las reglas tras 15 minutos."""
+    """Candado 3: Bucle ligero que expira y elimina automáticamente las reglas temporales tras 15 minutos."""
     while _modulo_soar_activo or _cuarentena_activa:
         try:
             ahora_epoch = time.time()
             expiradas = [
                 (ip_k, datos_q.get("rule_name"))
                 for ip_k, datos_q in list(_cuarentena_activa.items())
-                if ahora_epoch >= float(datos_q.get("expires_at", 0))
+                if not datos_q.get("is_permanent")
+                and datos_q.get("expires_at") is not None
+                and ahora_epoch >= float(datos_q.get("expires_at", 0))
             ]
             for ip_k, nombre_regla in expiradas:
                 _cuarentena_activa.pop(ip_k, None)
                 await run_in_threadpool(_desbloquear_ip_en_windows_firewall_sincrono, ip_k, nombre_regla)
-                registro_logger.info("Candado 3 SOAR: Cuarentena de 15 min expirada. IP %s desbloqueada (%s)", ip_k, nombre_regla)
+                registro_logger.info("Candado 3 SOAR: Cuarentena temporal de 15 min expirada. IP %s desbloqueada (%s)", ip_k, nombre_regla)
         except Exception:
             registro_logger.exception("Error en bucle de expiración de cuarentena SOAR")
         await asyncio.sleep(5.0)
@@ -2765,29 +2967,42 @@ async def _aplicar_paso5_mitigacion_firewall(
     protocolo: str,
     es_manual: bool = False,
     permitir_autobloqueo: bool = True,
+    modo_duracion: str = "15m",
 ) -> dict:
     """Paso 5 Automatizado de TI: Acción en el Firewall con aplicación estricta de los 4 Candados."""
-    # 1. Candado 1: Lista Inmutable Protegida
+    # 1. Candado 1: Lista Inmutable Protegida + Sesiones Salientes Confirmadas
     protegida, motivo_c1 = _evaluar_candado1_ip_protegida(ip_str)
     if protegida:
         return {
             "step": 5,
             "title": "Acción en Firewall (netsh)",
             "blocked": False,
-            "lock_triggered": "Candado 1 (Lista Inmutable)",
+            "lock_triggered": "Candado 1 (Protección Activa)",
             "rule_name": None,
             "badge": "Protegida (Candado 1)",
             "detail": motivo_c1,
         }
 
-    # Si ya está bloqueada en cuarentena activa, renovar o devolver estado actual
+    # Si ya está bloqueada en cuarentena activa y es flujo automático, conservar estado
     if ip_str in _cuarentena_activa and not es_manual:
         entrada_actual = _cuarentena_activa[ip_str]
-        restantes = max(0, int(float(entrada_actual["expires_at"]) - time.time()))
+        if entrada_actual.get("is_permanent"):
+            return {
+                "step": 5,
+                "title": "Acción en Firewall (netsh)",
+                "blocked": True,
+                "is_permanent": True,
+                "lock_triggered": "Bloqueo Manual Permanente",
+                "rule_name": entrada_actual["rule_name"],
+                "badge": "En Cuarentena (Permanente)",
+                "detail": f"Regla permanente {entrada_actual['rule_name']} activa en Windows Firewall (Hasta desbloqueo manual)",
+            }
+        restantes = max(0, int(float(entrada_actual.get("expires_at") or 0) - time.time()))
         return {
             "step": 5,
             "title": "Acción en Firewall (netsh)",
             "blocked": True,
+            "is_permanent": False,
             "lock_triggered": "Candado 3 (TTL 15 min Activo)",
             "rule_name": entrada_actual["rule_name"],
             "badge": f"En Cuarentena ({restantes // 60}m {restantes % 60}s)",
@@ -2815,19 +3030,24 @@ async def _aplicar_paso5_mitigacion_firewall(
             "lock_triggered": "Control Operador (1-Clic)",
             "rule_name": None,
             "badge": "Listo para Bloquear (1-Clic)",
-            "detail": "Investigación completada. Disponible para bloqueo inmediato con 1 clic",
+            "detail": "Investigación completada. Disponible para bloqueo permanente o temporal (15m) en 1 clic",
         }
 
-    # 3. Candado 3: Crear regla CyberShield_Block_<IP> con expiración de 15 minutos
-    exito_fw, nombre_regla, detalle_fw = await run_in_threadpool(_bloquear_ip_en_windows_firewall_sincrono, ip_str)
-    ahora_epoch = time.time()
-    expira_epoch = ahora_epoch + TTL_CUARENTENA_SOAR_SEG
-
-    identidad_host = (
-        f"{paso2.get('hostname')} ({paso2.get('mac')})"
-        if paso2.get("is_lan")
-        else f"{paso3.get('country')} • {paso3.get('isp')} ({paso3.get('asn')})"
+    # 3. Bloqueo Manual (Permanente por defecto o 15m opcional) vs Automático IPS (Obligatorio 15m por Candado 3)
+    es_permanente = bool(es_manual and str(modo_duracion).lower() == "permanent")
+    exito_fw, nombre_regla, detalle_fw = await run_in_threadpool(
+        _bloquear_ip_en_windows_firewall_sincrono, ip_str, es_permanente
     )
+    ahora_epoch = time.time()
+    expira_epoch = None if es_permanente else (ahora_epoch + TTL_CUARENTENA_SOAR_SEG)
+
+    if paso2.get("is_lan"):
+        identidad_host = f"{paso2.get('hostname')} • {paso2.get('device_nature')}"
+        if paso2.get("nat_vm_warning"):
+            identidad_host += f" [{paso2.get('nat_vm_warning')}]"
+    else:
+        identidad_host = f"{paso3.get('country')} • {paso3.get('isp')} ({paso3.get('attacker_type')})"
+
     mac_guardar = paso2.get("mac") if paso2.get("is_lan") else "N/A (WAN)"
 
     _cuarentena_activa[ip_str] = {
@@ -2839,26 +3059,33 @@ async def _aplicar_paso5_mitigacion_firewall(
         "blocked_at": ahora_epoch,
         "blocked_at_iso": fecha_a_iso_utc(obtener_utc_ingenuo()),
         "expires_at": expira_epoch,
-        "ttl_seconds": int(TTL_CUARENTENA_SOAR_SEG),
+        "is_permanent": es_permanente,
+        "duration_mode": "permanent" if es_permanente else "15m",
+        "ttl_seconds": None if es_permanente else int(TTL_CUARENTENA_SOAR_SEG),
         "firewall_os_applied": exito_fw,
-        "mode": "Manual 1-Clic" if es_manual else "Automático IPS",
+        "mode": "Manual Permanente" if es_permanente else ("Manual 15 min" if es_manual else "Automático IPS (15m)"),
         "sans_reports": paso4.get("reports", 0),
     }
     _asegurar_tarea_expiracion_soar()
 
-    estado_texto = (
-        f"Regla {nombre_regla} aplicada en Windows Firewall (TTL 15 min)"
-        if exito_fw
-        else f"Aislada en Cuarentena Activa ({nombre_regla} - TTL 15 min)"
-    )
+    if es_permanente:
+        badge_paso5 = "Bloqueada (Permanente)"
+        estado_texto = f"Regla {nombre_regla} activa Permanentemente en Firewall (Hasta desbloqueo manual)"
+        candado_info = "Bloqueo Manual Permanente"
+    else:
+        badge_paso5 = "Bloqueada (TTL 15 min)"
+        estado_texto = f"Regla {nombre_regla} aplicada con expiración automática de 15 min (Candado 3)"
+        candado_info = "Candado 3 (Expiración 15m)"
+
     return {
         "step": 5,
         "title": "Acción en Firewall (netsh)",
         "blocked": True,
-        "lock_triggered": "Candado 3 (Expiración 15m)",
+        "is_permanent": es_permanente,
+        "lock_triggered": candado_info,
         "rule_name": nombre_regla,
         "firewall_os_applied": exito_fw,
-        "badge": "Bloqueada (TTL 15 min)",
+        "badge": badge_paso5,
         "detail": estado_texto,
     }
 
@@ -2872,13 +3099,19 @@ async def _ejecutar_pipeline_5_pasos_soar(
     origen_evento: str = "sensor",
     es_manual: bool = False,
     permitir_autobloqueo: bool = True,
+    modo_duracion: str = "15m",
+    ttl_avg: Optional[float] = None,
+    ttl_std: Optional[float] = None,
 ) -> dict:
     global _contador_eventos_soar
     ip_limpia = (ip_atacante or "").strip()
 
-    paso1 = _diagnosticar_paso1_ttl_antispoofing(ip_limpia, protocolo, features)
+    paso1 = _diagnosticar_paso1_ttl_antispoofing(
+        ip_limpia, protocolo, features, ttl_avg_sensor=ttl_avg, ttl_std_sensor=ttl_std
+    )
+    ttl_para_paso2 = ttl_avg if ttl_avg is not None else paso1.get("ttl_estimated")
     paso2, paso3, paso4 = await asyncio.gather(
-        run_in_threadpool(_consultar_paso2_arp_lan_sincrono, ip_limpia),
+        run_in_threadpool(_consultar_paso2_arp_lan_sincrono, ip_limpia, ttl_para_paso2),
         run_in_threadpool(_consultar_paso3_wan_asn_sincrono, ip_limpia),
         run_in_threadpool(_consultar_paso4_sans_isc_sincrono, ip_limpia),
     )
@@ -2891,9 +3124,11 @@ async def _ejecutar_pipeline_5_pasos_soar(
         protocolo=protocolo,
         es_manual=es_manual,
         permitir_autobloqueo=permitir_autobloqueo,
+        modo_duracion=modo_duracion,
     )
 
     _contador_eventos_soar += 1
+    info_q_actual = _cuarentena_activa.get(ip_limpia)
     evento = {
         "event_id": _contador_eventos_soar,
         "timestamp": fecha_a_iso_utc(obtener_utc_ingenuo()),
@@ -2904,6 +3139,7 @@ async def _ejecutar_pipeline_5_pasos_soar(
         "source": origen_evento,
         "is_lan": bool(paso2.get("is_lan")),
         "is_blocked": bool(paso5.get("blocked")) or (ip_limpia in _cuarentena_activa),
+        "is_permanent": bool(info_q_actual and info_q_actual.get("is_permanent")),
         "steps": {
             "step1_ttl": paso1,
             "step2_lan": paso2,
@@ -2913,7 +3149,6 @@ async def _ejecutar_pipeline_5_pasos_soar(
         },
     }
 
-    # Actualizar si la IP ya estaba en la lista reciente o agregar al inicio
     for idx, ev_existente in enumerate(_eventos_soar_recientes):
         if ev_existente.get("src_ip") == ip_limpia:
             _eventos_soar_recientes[idx] = evento
@@ -2932,6 +3167,8 @@ def _disparar_investigacion_soar_asincrona(
     features: Optional[List[float]],
     origen_evento: str,
     permitir_autobloqueo: bool = True,
+    ttl_avg: Optional[float] = None,
+    ttl_std: Optional[float] = None,
 ) -> None:
     if not _modulo_soar_activo:
         return
@@ -2956,6 +3193,9 @@ def _disparar_investigacion_soar_asincrona(
                 origen_evento=origen_evento,
                 es_manual=False,
                 permitir_autobloqueo=permitir_autobloqueo,
+                modo_duracion="15m",
+                ttl_avg=ttl_avg,
+                ttl_std=ttl_std,
             ),
             name=f"soar-investigar-{ip_atacante}",
         )
@@ -3006,6 +3246,7 @@ async def _sembrar_investigaciones_recientes_al_activar() -> None:
                 origen_evento=src_orig,
                 es_manual=False,
                 permitir_autobloqueo=False,
+                modo_duracion="15m",
             )
     except Exception:
         registro_logger.exception("Error sembrando investigaciones iniciales SOAR")
@@ -3058,7 +3299,29 @@ class SolicitudAutobloqueoSoar(BaseModel):
 class SolicitudAccionIpSoar(BaseModel):
     ip: str = Field(..., min_length=3, max_length=45)
     protocol: str = Field(default="TCP", max_length=12)
+    duration_mode: Literal["permanent", "15m"] = Field(default="permanent")
     reason: Optional[str] = Field(default="Aislamiento manual por operador en Centro SOAR", max_length=200)
+
+
+@aplicacion.get("/api/soar/blocklist.txt", response_class=PlainTextResponse)
+async def obtener_blocklist_plana_edl():
+    """
+    Feed Dinámico de Bloqueo Perimetral (EDL) en texto plano (1 IP por línea)
+    para sincronización con Routers/Firewalls empresariales (MikroTik, pfSense, FortiGate).
+    """
+    if not _modulo_soar_activo or not _cuarentena_activa:
+        return PlainTextResponse("", media_type="text/plain; charset=utf-8")
+
+    ahora_epoch = time.time()
+    ips_vigentes = []
+    for ip_k, info_q in list(_cuarentena_activa.items()):
+        es_perm = bool(info_q.get("is_permanent"))
+        exp_at = info_q.get("expires_at")
+        if es_perm or (exp_at is not None and float(exp_at) > ahora_epoch):
+            ips_vigentes.append(str(ip_k).strip())
+
+    contenido = ("\n".join(ips_vigentes) + "\n") if ips_vigentes else ""
+    return PlainTextResponse(contenido, media_type="text/plain; charset=utf-8")
 
 
 @aplicacion.get("/api/soar/status", dependencies=[Depends(verificar_acceso_operativo)])
@@ -3131,13 +3394,22 @@ async def obtener_datos_centro_soar():
     ahora_epoch = time.time()
     lista_cuarentena = []
     for ip_k, info_q in list(_cuarentena_activa.items()):
-        restantes = max(0, int(float(info_q.get("expires_at", 0)) - ahora_epoch))
-        if restantes <= 0:
-            continue
-        lista_cuarentena.append({
-            **info_q,
-            "remaining_seconds": restantes,
-        })
+        es_perm = bool(info_q.get("is_permanent"))
+        if es_perm:
+            lista_cuarentena.append({
+                **info_q,
+                "is_permanent": True,
+                "remaining_seconds": -1,
+            })
+        else:
+            restantes = max(0, int(float(info_q.get("expires_at") or 0) - ahora_epoch))
+            if restantes <= 0:
+                continue
+            lista_cuarentena.append({
+                **info_q,
+                "is_permanent": False,
+                "remaining_seconds": restantes,
+            })
 
     eventos_actualizados = []
     for ev in list(_eventos_soar_recientes):
@@ -3147,9 +3419,13 @@ async def obtener_datos_centro_soar():
         copia_ev["is_blocked"] = esta_bloqueada
         if esta_bloqueada and ip_ev in _cuarentena_activa:
             info_q = _cuarentena_activa[ip_ev]
-            rest = max(0, int(float(info_q.get("expires_at", 0)) - ahora_epoch))
-            copia_ev["remaining_seconds"] = rest
+            es_perm = bool(info_q.get("is_permanent"))
+            copia_ev["is_permanent"] = es_perm
+            copia_ev["remaining_seconds"] = (
+                -1 if es_perm else max(0, int(float(info_q.get("expires_at") or 0) - ahora_epoch))
+            )
         else:
+            copia_ev["is_permanent"] = False
             copia_ev["remaining_seconds"] = 0
         eventos_actualizados.append(copia_ev)
 
@@ -3157,6 +3433,7 @@ async def obtener_datos_centro_soar():
         "enabled": _modulo_soar_activo,
         "auto_block": _autobloqueo_soar_activo,
         "ttl_minutes": 15,
+        "primary_local_ip": sorted(_IPS_PROPIAS_SERVIDOR)[-1] if _IPS_PROPIAS_SERVIDOR else "192.168.18.10",
         "lock1_protected": _obtener_resumen_candado1(),
         "quarantine": lista_cuarentena,
         "events": eventos_actualizados,
@@ -3178,6 +3455,7 @@ async def bloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
     if protegida:
         raise HTTPException(status_code=403, detail=motivo_c1)
 
+    modo_dur = solicitud.duration_mode if solicitud.duration_mode in ("permanent", "15m") else "permanent"
     evento = await _ejecutar_pipeline_5_pasos_soar(
         ip_atacante=ip_objetivo,
         ip_destino="192.168.18.10",
@@ -3187,12 +3465,16 @@ async def bloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
         origen_evento="manual_soar",
         es_manual=True,
         permitir_autobloqueo=True,
+        modo_duracion=modo_dur,
     )
+    es_perm = (modo_dur == "permanent")
     return {
         "status": "blocked",
         "ip": ip_objetivo,
         "rule_name": _nombre_regla_firewall_ip(ip_objetivo),
-        "ttl_seconds": int(TTL_CUARENTENA_SOAR_SEG),
+        "is_permanent": es_perm,
+        "duration_mode": modo_dur,
+        "ttl_seconds": None if es_perm else int(TTL_CUARENTENA_SOAR_SEG),
         "event": evento,
     }
 
@@ -3210,8 +3492,10 @@ async def desbloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
     for ev in _eventos_soar_recientes:
         if ev.get("src_ip") == ip_objetivo:
             ev["is_blocked"] = False
+            ev["is_permanent"] = False
             if "steps" in ev and "step5_firewall" in ev["steps"]:
                 ev["steps"]["step5_firewall"]["blocked"] = False
+                ev["steps"]["step5_firewall"]["is_permanent"] = False
                 ev["steps"]["step5_firewall"]["badge"] = "Desbloqueada por Operador"
                 ev["steps"]["step5_firewall"]["detail"] = f"Regla {nombre_regla} eliminada manualmente en 1 clic"
 

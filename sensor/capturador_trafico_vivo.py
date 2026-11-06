@@ -172,7 +172,7 @@ def _parsear_trama_binaria_rapida(trama: bytes, marca_tiempo: float):
         longitud_datos = max(0, ip_total_len - ihl_bytes - cabecera_tcp)
         return (
             marca_tiempo, ip_origen, puerto_origen, ip_destino, puerto_destino,
-            6, "TCP", longitud_datos, banderas_tcp, cabecera_tcp, ventana_tcp
+            6, "TCP", longitud_datos, banderas_tcp, cabecera_tcp, ventana_tcp, int(_ttl)
         )
 
     if proto == 17:
@@ -182,14 +182,14 @@ def _parsear_trama_binaria_rapida(trama: bytes, marca_tiempo: float):
         longitud_datos = max(0, (udp_len - 8) if udp_len >= 8 else (ip_total_len - ihl_bytes - 8))
         return (
             marca_tiempo, ip_origen, puerto_origen, ip_destino, puerto_destino,
-            17, "UDP", longitud_datos, 0, BYTES_CABECERA_UDP, -1
+            17, "UDP", longitud_datos, 0, BYTES_CABECERA_UDP, -1, int(_ttl)
         )
 
     if proto == 1:
         longitud_datos = max(0, ip_total_len - ihl_bytes - 8)
         return (
             marca_tiempo, ip_origen, 0, ip_destino, 0,
-            1, "ICMP", longitud_datos, 0, 8, -1
+            1, "ICMP", longitud_datos, 0, 8, -1, int(_ttl)
         )
 
     return None
@@ -306,7 +306,7 @@ class EstadisticasFlujo:
         "ventana_inicial_ida", "ventana_inicial_vuelta", "paquetes_datos_ida",
         "segmento_minimo_ida", "inicio_activo", "fin_activo", "tiempos_activos",
         "tiempos_inactivos", "cerrado_por_bandera", "anclado_midstream",
-        "sesion_local_confirmada",
+        "sesion_local_confirmada", "ttls_ida", "ttls_vuelta",
     )
 
     def __init__(self, clave, marca_tiempo, ip_origen, puerto_origen, ip_destino, puerto_destino, protocolo, nombre_protocolo):
@@ -330,12 +330,14 @@ class EstadisticasFlujo:
         self.cerrado_por_bandera = False
         self.anclado_midstream = False
         self.sesion_local_confirmada = False
+        self.ttls_ida, self.ttls_vuelta = [], []
 
     def invertir_direccion(self) -> None:
         self.ip_origen, self.ip_destino = self.ip_destino, self.ip_origen
         self.puerto_origen, self.puerto_destino = self.puerto_destino, self.puerto_origen
         self.clave = (self.ip_origen, self.puerto_origen, self.ip_destino, self.puerto_destino, self.protocolo)
         self.longitudes_ida, self.longitudes_vuelta = self.longitudes_vuelta, self.longitudes_ida
+        self.ttls_ida, self.ttls_vuelta = self.ttls_vuelta, self.ttls_ida
         self.iat_ida, self.iat_vuelta = self.iat_vuelta, self.iat_ida
         self.ultimo_tiempo_ida, self.ultimo_tiempo_vuelta = self.ultimo_tiempo_vuelta, self.ultimo_tiempo_ida
         self.psh_ida, self.psh_vuelta = self.psh_vuelta, self.psh_ida
@@ -372,6 +374,7 @@ class EstadisticasFlujo:
         banderas_tcp: int,
         cabecera_l4: int,
         ventana_tcp: int,
+        ttl_ip: int = 64,
     ) -> None:
         if self.total_paquetes > 0 and len(self.iat_flujo) < MAXIMO_MUESTRAS_POR_FLUJO:
             self.iat_flujo.append(max(marca_tiempo - self.tiempo_ultimo, 0.0) * 1e6)
@@ -396,12 +399,16 @@ class EstadisticasFlujo:
             self.ultimo_tiempo_ida = marca_tiempo
             if len(self.longitudes_ida) < MAXIMO_MUESTRAS_POR_FLUJO:
                 self.longitudes_ida.append(longitud_datos)
+            if ttl_ip > 0 and len(self.ttls_ida) < 64:
+                self.ttls_ida.append(int(ttl_ip))
         else:
             if self.ultimo_tiempo_vuelta is not None and len(self.iat_vuelta) < MAXIMO_MUESTRAS_POR_FLUJO:
                 self.iat_vuelta.append(max(marca_tiempo - self.ultimo_tiempo_vuelta, 0.0) * 1e6)
             self.ultimo_tiempo_vuelta = marca_tiempo
             if len(self.longitudes_vuelta) < MAXIMO_MUESTRAS_POR_FLUJO:
                 self.longitudes_vuelta.append(longitud_datos)
+            if ttl_ip > 0 and len(self.ttls_vuelta) < 64:
+                self.ttls_vuelta.append(int(ttl_ip))
 
         if proto == 6:
             if es_ida:
@@ -450,6 +457,7 @@ class EstadisticasFlujo:
 
     def actualizar(self, paquete, marca_tiempo: float, es_ida: bool) -> None:
         longitud_datos = _obtener_longitud_datos_utiles(paquete)
+        ttl_pkt = int(getattr(paquete[IP], "ttl", 64) or 64) if paquete.haslayer(IP) else 64
         if paquete.haslayer(TCP):
             tcp = paquete[TCP]
             self.actualizar_campos_rapidos(
@@ -460,15 +468,16 @@ class EstadisticasFlujo:
                 int(tcp.flags),
                 int(tcp.dataofs or 5) * 4,
                 int(tcp.window),
+                ttl_pkt,
             )
         elif paquete.haslayer(UDP):
             self.actualizar_campos_rapidos(
-                marca_tiempo, es_ida, longitud_datos, 17, 0, BYTES_CABECERA_UDP, -1
+                marca_tiempo, es_ida, longitud_datos, 17, 0, BYTES_CABECERA_UDP, -1, ttl_pkt
             )
         else:
             proto = int(getattr(paquete[IP], "proto", 0)) if paquete.haslayer(IP) else 0
             self.actualizar_campos_rapidos(
-                marca_tiempo, es_ida, longitud_datos, proto, 0, 0, -1
+                marca_tiempo, es_ida, longitud_datos, proto, 0, 0, -1, ttl_pkt
             )
 
     update = actualizar
@@ -527,6 +536,19 @@ class EstadisticasFlujo:
     to_vector = hacia_vector
 
     def hacia_registro(self, tiempo_exportacion: float) -> dict:
+        muestras_ttl = self.ttls_ida if self.ttls_ida else self.ttls_vuelta
+        if muestras_ttl:
+            ttl_promedio = round(sum(muestras_ttl) / len(muestras_ttl), 1)
+            if len(muestras_ttl) > 1:
+                media_t = sum(muestras_ttl) / len(muestras_ttl)
+                var_t = sum((t - media_t) ** 2 for t in muestras_ttl) / (len(muestras_ttl) - 1)
+                ttl_std = round(math.sqrt(max(0.0, var_t)), 2)
+            else:
+                ttl_std = 0.0
+        else:
+            ttl_promedio = 64.0
+            ttl_std = 0.0
+
         return {
             "features": self.hacia_vector(),
             "src_ip": str(self.ip_origen),
@@ -535,6 +557,9 @@ class EstadisticasFlujo:
             "duration_ms": round(max(self.tiempo_ultimo - self.tiempo_inicio, 0.0) * 1000, 2),
             "total_bytes": int(sum(self.longitudes_ida) + sum(self.longitudes_vuelta)),
             "exported_at": tiempo_exportacion,
+            "ttl_avg": ttl_promedio,
+            "ttl_std": ttl_std,
+            "sesion_local_confirmada": bool(self.sesion_local_confirmada),
         }
 
     to_record = hacia_registro
@@ -578,6 +603,7 @@ class TablaFlujos:
         banderas_tcp: int,
         cabecera_l4: int,
         ventana_tcp: int,
+        ttl_ip: int = 64,
     ) -> None:
         clave_ida = (ip_origen, puerto_origen, ip_destino, puerto_destino, proto)
         clave_retorno = (ip_destino, puerto_destino, ip_origen, puerto_origen, proto)
@@ -693,7 +719,7 @@ class TablaFlujos:
                 self.flujos[clave_elegida] = flujo
 
             flujo.actualizar_campos_rapidos(
-                marca_tiempo, es_ida, longitud_datos, proto, banderas_tcp, cabecera_l4, ventana_tcp
+                marca_tiempo, es_ida, longitud_datos, proto, banderas_tcp, cabecera_l4, ventana_tcp, ttl_ip
             )
             self.flujos.move_to_end(clave_elegida)
 
@@ -767,6 +793,7 @@ class TablaFlujos:
             banderas_tcp,
             cabecera_l4,
             ventana_tcp,
+            int(getattr(ip, "ttl", 64) or 64),
         )
 
     process = procesar_paquete
