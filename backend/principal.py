@@ -548,6 +548,14 @@ def _registrar_ip_sesion_saliente_confirmada(ip_remota: str, ahora_mono: float) 
     ip_limpia = (ip_remota or "").strip()
     if not ip_limpia or ip_limpia in _IPS_PROPIAS_SERVIDOR or ip_limpia in ("127.0.0.1", "::1"):
         return
+    if ip_limpia.startswith(("203.0.113.", "198.51.100.", "192.0.2.")):
+        return
+    try:
+        ip_obj = ipaddress.ip_address(ip_limpia)
+        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_multicast or ip_obj.is_link_local:
+            return
+    except ValueError:
+        return
     while _ips_remotas_sesion_confirmada:
         _, t_antiguo = next(iter(_ips_remotas_sesion_confirmada.items()))
         if (ahora_mono - t_antiguo) <= TTL_CONNTRACK_SEG:
@@ -2455,6 +2463,15 @@ def _verificar_clave_maestra_soar(clave_ingresada: str) -> bool:
 
 
 def _ip_tiene_sesion_saliente_confirmada(ip_limpia: str) -> bool:
+    if ip_limpia.startswith(("203.0.113.", "198.51.100.", "192.0.2.")):
+        return False
+    try:
+        ip_obj = ipaddress.ip_address(ip_limpia)
+        if ip_obj.is_private or ip_obj.is_loopback or ip_obj.is_multicast or ip_obj.is_link_local:
+            return False
+    except ValueError:
+        return False
+
     ahora_mono = time.monotonic()
     while _ips_remotas_sesion_confirmada:
         _, t_ant = next(iter(_ips_remotas_sesion_confirmada.items()))
@@ -3005,6 +3022,7 @@ async def _bucle_expiracion_cuarentena_soar() -> None:
             ]
             for ip_k, nombre_regla in expiradas:
                 _cuarentena_activa.pop(ip_k, None)
+                _ultimas_ips_investigadas.pop(ip_k, None)
                 await run_in_threadpool(_desbloquear_ip_en_windows_firewall_sincrono, ip_k, nombre_regla)
                 registro_logger.info("Candado 3 SOAR: Cuarentena temporal de 15 min expirada. IP %s desbloqueada (%s)", ip_k, nombre_regla)
         except Exception:
@@ -3284,7 +3302,8 @@ def _disparar_investigacion_soar_asincrona(
         return
     ahora_mono = time.monotonic()
     ultimo_t = _ultimas_ips_investigadas.get(ip_limpia, 0.0)
-    if (ahora_mono - ultimo_t) < COOLDOWN_INVESTIGACION_IP_SEG:
+    cooldown_efectivo = COOLDOWN_INVESTIGACION_IP_SEG if ip_limpia in _cuarentena_activa else 1.0
+    if (ahora_mono - ultimo_t) < cooldown_efectivo:
         return
 
     _ultimas_ips_investigadas[ip_limpia] = ahora_mono
@@ -3630,6 +3649,7 @@ async def desbloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
 
     ip_objetivo = solicitud.ip.strip()
     info_previa = _cuarentena_activa.pop(ip_objetivo, None)
+    _ultimas_ips_investigadas.pop(ip_objetivo, None)
     nombre_regla = (info_previa or {}).get("rule_name") or _nombre_regla_firewall_ip(ip_objetivo)
     exito_fw, _ = await run_in_threadpool(_desbloquear_ip_en_windows_firewall_sincrono, ip_objetivo, nombre_regla)
 
