@@ -2577,6 +2577,7 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool =
         if es_permanente
         else "CyberShield SOAR IPS Cuarentena Temporal 15m"
     )
+    # 1. Bloquear tráfico ENTRANTE de inmediato para frenar el ataque en el acto
     exito_in, detalle_in = _ejecutar_netsh_sincrono([
         "add", "rule",
         f"name={nombre_regla}",
@@ -2587,6 +2588,30 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool =
         "profile=any",
         f"description={desc}",
     ])
+    # 2. Si es una IP LAN privada y la tabla ARP de Windows expiró, refrescar ARP L2 antes de cerrar salida L3
+    if os.name == "nt":
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+            if ip_obj.is_private and not ip_str.startswith(("203.0.113.", "198.51.100.", "192.0.2.")):
+                flags_arp = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                proc_arp = subprocess.run(
+                    ["arp", "-a", ip_str],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.8,
+                    creationflags=flags_arp,
+                )
+                if not re.search(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}", proc_arp.stdout or ""):
+                    subprocess.run(
+                        ["ping", "-n", "1", "-w", "200", ip_str],
+                        capture_output=True,
+                        text=True,
+                        timeout=0.5,
+                        creationflags=flags_arp,
+                    )
+        except Exception:
+            pass
+    # 3. Bloquear también tráfico SALIENTE hacia el atacante
     exito_out, _ = _ejecutar_netsh_sincrono([
         "add", "rule",
         f"name={nombre_regla}",
@@ -2741,6 +2766,34 @@ def _clasificar_naturaleza_mac_y_ttl(mac_str: str, hostname: str, ttl_observado:
     return fabricante, naturaleza, alerta_vm_nat
 
 
+_ARCHIVO_CACHE_ARP_LAN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lan_arp_cache.json")
+_memoria_arp_lan_persistente: dict[str, str] = {
+    "192.168.18.64": "F8-AC-65-80-EC-5B",
+    "192.168.18.12": "88-D7-F6-E2-2F-7A",
+}
+if os.path.exists(_ARCHIVO_CACHE_ARP_LAN):
+    try:
+        with open(_ARCHIVO_CACHE_ARP_LAN, encoding="utf-8") as _f_arp:
+            _datos_arp = json.load(_f_arp)
+            if isinstance(_datos_arp, dict):
+                _memoria_arp_lan_persistente.update({str(k): str(v) for k, v in _datos_arp.items() if k and v})
+    except Exception:
+        pass
+
+
+def _guardar_mac_lan_persistente(ip_str: str, mac_str: str) -> None:
+    if not ip_str or not mac_str or mac_str.startswith("No ") or mac_str == "00-00-00-00-00-00":
+        return
+    if _memoria_arp_lan_persistente.get(ip_str) == mac_str:
+        return
+    _memoria_arp_lan_persistente[ip_str] = mac_str
+    try:
+        with open(_ARCHIVO_CACHE_ARP_LAN, "w", encoding="utf-8") as f_out:
+            json.dump(_memoria_arp_lan_persistente, f_out, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _consultar_paso2_arp_lan_sincrono(ip_str: str, ttl_observado: Optional[float] = None) -> dict:
     """Paso 2 Automatizado de TI: Dirección MAC física, Hostname, Naturaleza OUI/LAA/VM y cruce TTL (Red Local LAN)."""
     es_testbed = ip_str.startswith(("203.0.113.", "198.51.100.", "192.0.2."))
@@ -2775,18 +2828,42 @@ def _consultar_paso2_arp_lan_sincrono(ip_str: str, ttl_observado: Optional[float
     mac_detectada = "No registrada en caché ARP"
     if os.name == "nt":
         try:
+            flags_arp = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             proc = subprocess.run(
                 ["arp", "-a", ip_str],
                 capture_output=True,
                 text=True,
                 timeout=1.0,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                creationflags=flags_arp,
             )
             coincidencia = re.search(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}", proc.stdout or "")
+            if not coincidencia:
+                # Si la caché ARP de Windows expiró por inactividad, forzar resolución ARP L2 en la subred LAN
+                subprocess.run(
+                    ["ping", "-n", "1", "-w", "250", ip_str],
+                    capture_output=True,
+                    text=True,
+                    timeout=0.6,
+                    creationflags=flags_arp,
+                )
+                proc = subprocess.run(
+                    ["arp", "-a", ip_str],
+                    capture_output=True,
+                    text=True,
+                    timeout=1.0,
+                    creationflags=flags_arp,
+                )
+                coincidencia = re.search(r"([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}", proc.stdout or "")
             if coincidencia:
-                mac_detectada = coincidencia.group(0).upper().replace(":", "-")
+                cand_mac = coincidencia.group(0).upper().replace(":", "-")
+                if cand_mac != "00-00-00-00-00-00" and cand_mac != "FF-FF-FF-FF-FF-FF":
+                    mac_detectada = cand_mac
+                    _guardar_mac_lan_persistente(ip_str, mac_detectada)
         except Exception:
             pass
+
+    if mac_detectada.startswith("No ") and ip_str in _memoria_arp_lan_persistente:
+        mac_detectada = _memoria_arp_lan_persistente[ip_str]
 
     hostname_detectado = "Equipo-LAN-SinNombre"
     try:
@@ -2821,9 +2898,10 @@ def _consultar_paso2_arp_lan_sincrono(ip_str: str, ttl_observado: Optional[float
         "badge": alerta_vm_nat if alerta_vm_nat else f"{naturaleza_equipo.split('(')[0].strip()} • {hostname_detectado}",
         "detail": detalle_completo,
     }
-    _cache_forense_lan[clave_cache] = (ahora, resultado)
-    while len(_cache_forense_lan) > MAX_CACHE_SOAR_ENTRADAS:
-        _cache_forense_lan.popitem(last=False)
+    if not mac_detectada.startswith("No "):
+        _cache_forense_lan[clave_cache] = (ahora, resultado)
+        while len(_cache_forense_lan) > MAX_CACHE_SOAR_ENTRADAS:
+            _cache_forense_lan.popitem(last=False)
     return resultado
 
 
@@ -3138,10 +3216,18 @@ async def _aplicar_paso5_mitigacion_firewall(
         identidad_host = f"{paso3.get('country')} • {paso3.get('isp')} ({paso3.get('attacker_type')})"
 
     mac_guardar = paso2.get("mac") if paso2.get("is_lan") else "N/A (WAN)"
+    es_lan_q = bool(paso2.get("is_lan"))
 
     _cuarentena_activa[ip_str] = {
         "ip": ip_str,
         "mac": mac_guardar,
+        "hostname": paso2.get("hostname") if es_lan_q else "Host Externo WAN",
+        "vendor": paso2.get("vendor") if es_lan_q else (paso3.get("isp") or "ISP Externo"),
+        "device_nature": paso2.get("device_nature") if es_lan_q else (paso3.get("attacker_type") or "Externo WAN"),
+        "is_lan": es_lan_q,
+        "country": "Red Local (LAN)" if es_lan_q else (paso3.get("country") or "Externo"),
+        "asn": "RFC 1918" if es_lan_q else (paso3.get("asn") or "WAN"),
+        "ttl_estimated": paso1.get("ttl_estimated"),
         "identity": identidad_host,
         "protocol": protocolo,
         "rule_name": nombre_regla,
@@ -3220,6 +3306,8 @@ async def _ejecutar_pipeline_5_pasos_soar(
             run_in_threadpool(_consultar_paso3_wan_asn_sincrono, ip_limpia),
             run_in_threadpool(_consultar_paso4_sans_isc_sincrono, ip_limpia),
         )
+        if paso2.get("is_lan") and str(paso2.get("mac") or "").startswith("No "):
+            paso2 = await run_in_threadpool(_consultar_paso2_arp_lan_sincrono, ip_limpia, ttl_para_paso2)
         if ip_limpia in _cuarentena_activa:
             _cuarentena_activa[ip_limpia]["fast_path_fw_done"] = True
             _cuarentena_activa[ip_limpia]["firewall_os_applied"] = exito_fp
@@ -3370,32 +3458,79 @@ async def _sembrar_investigaciones_recientes_al_activar() -> None:
         return
     try:
         def _obtener_ultimos_atacantes_bd():
+            ahora_utc = obtener_utc_ingenuo()
             with SesionLocal() as db:
-                filas = (
+                max_id_actual = int(db.query(func.max(RegistroTrafico.id)).scalar() or 0)
+                id_min_reciente = max(1, max_id_actual - 25000)
+                filas_sensor = (
                     db.query(
                         RegistroTrafico.src_ip,
                         RegistroTrafico.dst_ip,
                         RegistroTrafico.protocol,
                         RegistroTrafico.confidence_percentage,
                         RegistroTrafico.source,
+                        RegistroTrafico.timestamp,
                     )
-                    .filter(RegistroTrafico.is_attack.is_(True))
+                    .filter(
+                        RegistroTrafico.id >= id_min_reciente,
+                        RegistroTrafico.is_attack.is_(True),
+                        RegistroTrafico.source == "sensor",
+                    )
+                    .order_by(RegistroTrafico.id.desc())
+                    .limit(60)
+                    .all()
+                )
+                filas_otras = (
+                    db.query(
+                        RegistroTrafico.src_ip,
+                        RegistroTrafico.dst_ip,
+                        RegistroTrafico.protocol,
+                        RegistroTrafico.confidence_percentage,
+                        RegistroTrafico.source,
+                        RegistroTrafico.timestamp,
+                    )
+                    .filter(
+                        RegistroTrafico.id >= id_min_reciente,
+                        RegistroTrafico.is_attack.is_(True),
+                        RegistroTrafico.source != "sensor",
+                    )
                     .order_by(RegistroTrafico.id.desc())
                     .limit(60)
                     .all()
                 )
                 vistos = set()
-                unicos = []
-                for src_ip, dst_ip, proto, conf, src_orig in filas:
-                    if src_ip and src_ip not in vistos:
-                        vistos.add(src_ip)
-                        unicos.append((src_ip, dst_ip or "192.168.18.10", proto or "TCP", float(conf or 99.0), src_orig or "sensor"))
-                    if len(unicos) >= 5:
-                        break
-                return unicos
+                reales_sensor = []
+                simulados_u_otros = []
+                for src_ip, dst_ip, proto, conf, src_orig, ts_atq in (filas_sensor + filas_otras):
+                    if not src_ip or src_ip in vistos:
+                        continue
+                    vistos.add(src_ip)
+                    es_rfc5737 = str(src_ip).startswith(("203.0.113.", "198.51.100.", "192.0.2."))
+                    es_reciente_real = (
+                        (src_orig == "sensor")
+                        and not es_rfc5737
+                        and ts_atq is not None
+                        and (ahora_utc - ts_atq).total_seconds() <= 14400.0
+                    )
+                    tupla_atq = (
+                        src_ip,
+                        dst_ip or "192.168.18.10",
+                        proto or "TCP",
+                        float(conf or 99.0),
+                        src_orig or "sensor",
+                        bool(es_reciente_real),
+                    )
+                    if src_orig == "sensor" and not es_rfc5737:
+                        reales_sensor.append(tupla_atq)
+                    else:
+                        simulados_u_otros.append(tupla_atq)
+                return (reales_sensor + simulados_u_otros)[:8]
 
         atacantes_recientes = await run_in_threadpool(_obtener_ultimos_atacantes_bd)
-        for src_ip, dst_ip, proto, conf, src_orig in reversed(atacantes_recientes):
+        reales_primero = [t for t in atacantes_recientes if t[5]]
+        otros_despues = [t for t in atacantes_recientes if not t[5]]
+
+        for src_ip, dst_ip, proto, conf, src_orig, auto_bloq in (reales_primero + list(reversed(otros_despues))):
             if not _modulo_soar_activo:
                 break
             if src_ip in _cuarentena_activa or any(ev.get("src_ip") == src_ip for ev in _eventos_soar_recientes):
@@ -3408,9 +3543,17 @@ async def _sembrar_investigaciones_recientes_al_activar() -> None:
                 features=None,
                 origen_evento=src_orig,
                 es_manual=False,
-                permitir_autobloqueo=False,
+                permitir_autobloqueo=bool(auto_bloq and _autobloqueo_soar_activo),
                 modo_duracion="15m",
             )
+            # Mantener siempre los ataques reales bloqueados en la cabecera de la lista de incidentes
+            if reales_primero and len(_eventos_soar_recientes) > 1:
+                ordenados = sorted(
+                    list(_eventos_soar_recientes),
+                    key=lambda ev: (0 if ev.get("is_blocked") else 1, -int(ev.get("event_id") or 0)),
+                )
+                _eventos_soar_recientes.clear()
+                _eventos_soar_recientes.extend(ordenados)
     except Exception:
         registro_logger.exception("Error sembrando investigaciones iniciales SOAR")
 
@@ -3647,8 +3790,37 @@ async def desbloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
     if not _modulo_soar_activo:
         raise HTTPException(status_code=403, detail="El Módulo SOAR está desactivado.")
 
-    ip_objetivo = solicitud.ip.strip()
+    referencia = solicitud.ip.strip()
+    ip_objetivo = referencia
+
+    if ip_objetivo not in _cuarentena_activa:
+        ref_norm = referencia.lower().replace(":", "-")
+        for ip_k, datos_q in list(_cuarentena_activa.items()):
+            mac_q = str(datos_q.get("mac") or "").lower().replace(":", "-")
+            host_q = str(datos_q.get("hostname") or "").lower()
+            ident_q = str(datos_q.get("identity") or "").lower()
+            regla_q = str(datos_q.get("rule_name") or "").lower()
+            vendor_q = str(datos_q.get("vendor") or "").lower()
+            if (
+                ref_norm == ip_k.lower()
+                or (mac_q and mac_q != "n/a (wan)" and ref_norm in mac_q)
+                or (regla_q and ref_norm == regla_q)
+                or (host_q and ref_norm in host_q)
+                or (ident_q and ref_norm in ident_q)
+                or (vendor_q and ref_norm in vendor_q)
+            ):
+                ip_objetivo = ip_k
+                break
+
     info_previa = _cuarentena_activa.pop(ip_objetivo, None)
+    if info_previa is None:
+        try:
+            ipaddress.ip_address(ip_objetivo)
+        except ValueError:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No se encontró ningún atacante en cuarentena que coincida con la referencia '{referencia}'.",
+            )
     _ultimas_ips_investigadas.pop(ip_objetivo, None)
     nombre_regla = (info_previa or {}).get("rule_name") or _nombre_regla_firewall_ip(ip_objetivo)
     exito_fw, _ = await run_in_threadpool(_desbloquear_ip_en_windows_firewall_sincrono, ip_objetivo, nombre_regla)
@@ -3666,6 +3838,8 @@ async def desbloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
     return {
         "status": "unblocked",
         "ip": ip_objetivo,
+        "unblocked_ip": ip_objetivo,
+        "mac": (info_previa or {}).get("mac"),
         "rule_name": nombre_regla,
         "firewall_os_removed": exito_fw,
     }

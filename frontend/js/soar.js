@@ -13,8 +13,13 @@
     const inputIpManualBloquear = document.getElementById('inputIpManualBloquear');
     const selectProtoManualBloquear = document.getElementById('selectProtoManualBloquear');
     const selectDuracionManualBloquear = document.getElementById('selectDuracionManualBloquear');
+    const inputBuscarCuarentena = document.getElementById('inputBuscarCuarentena');
+    const selectFiltroCuarentena = document.getElementById('selectFiltroCuarentena');
+    const inputBuscarEventosSoar = document.getElementById('inputBuscarEventosSoar');
+    const selectFiltroEstadoEventos = document.getElementById('selectFiltroEstadoEventos');
 
     let cuarentenaLocal = [];
+    let eventosLocal = [];
 
     function escaparHtml(texto) {
         return String(texto == null ? '' : texto)
@@ -95,11 +100,59 @@
         });
     };
 
+    function normalizarTextoBusqueda(txt) {
+        return String(txt || '').toLowerCase().trim();
+    }
+
+    function filtrarItemsCuarentena(lista) {
+        const q = normalizarTextoBusqueda(inputBuscarCuarentena ? inputBuscarCuarentena.value : '');
+        const qMac = q.replace(/:/g, '-');
+        const filtroTipo = selectFiltroCuarentena ? selectFiltroCuarentena.value : 'all';
+
+        return lista.filter((item) => {
+            const esLan = item.is_lan !== undefined
+                ? Boolean(item.is_lan)
+                : (String(item.mac || '').includes('-') && !String(item.mac || '').includes('WAN'));
+            const esPerm = Boolean(item.is_permanent);
+
+            if (filtroTipo === 'lan' && !esLan) return false;
+            if (filtroTipo === 'wan' && esLan) return false;
+            if (filtroTipo === 'permanent' && !esPerm) return false;
+            if (filtroTipo === '15m' && esPerm) return false;
+
+            if (!q) return true;
+
+            const campos = [
+                item.ip,
+                item.mac,
+                String(item.mac || '').replace(/-/g, ':'),
+                item.hostname,
+                item.vendor,
+                item.device_nature,
+                item.identity,
+                item.protocol,
+                item.rule_name,
+                item.mode,
+                item.country,
+                item.asn
+            ].map(normalizarTextoBusqueda);
+
+            return campos.some((c) => c.includes(q) || (qMac && c.includes(qMac)));
+        });
+    }
+
     function renderizarTablaCuarentena() {
         if (!tbodyCuarentenaActiva) return;
         if (kpiCuarentenaActiva) kpiCuarentenaActiva.textContent = String(cuarentenaLocal.length);
+
+        const filtrados = filtrarItemsCuarentena(cuarentenaLocal);
+
         if (badgeTotalCuarentena) {
-            badgeTotalCuarentena.textContent = `${cuarentenaLocal.length} ${cuarentenaLocal.length === 1 ? 'regla activa' : 'reglas activas'}`;
+            if (filtrados.length !== cuarentenaLocal.length) {
+                badgeTotalCuarentena.textContent = `${filtrados.length} de ${cuarentenaLocal.length} reglas`;
+            } else {
+                badgeTotalCuarentena.textContent = `${cuarentenaLocal.length} ${cuarentenaLocal.length === 1 ? 'regla activa' : 'reglas activas'}`;
+            }
         }
 
         if (!cuarentenaLocal.length) {
@@ -114,15 +167,42 @@
             return;
         }
 
-        tbodyCuarentenaActiva.innerHTML = cuarentenaLocal.map((item) => {
+        if (!filtrados.length) {
+            const termino = escaparHtml(inputBuscarCuarentena ? inputBuscarCuarentena.value : '');
+            tbodyCuarentenaActiva.innerHTML = `
+                <tr>
+                    <td colspan="6" class="text-center text-muted py-4">
+                        <i class="bi bi-search text-secondary fs-4 d-block mb-1"></i>
+                        Ningún atacante en cuarentena coincide con la referencia <strong>"${termino}"</strong>.
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        tbodyCuarentenaActiva.innerHTML = filtrados.map((item) => {
             const ip = escaparHtml(item.ip);
-            const mac = escaparHtml(item.mac || 'N/A (WAN)');
+            const macRaw = String(item.mac || 'N/A (WAN)');
+            const mac = escaparHtml(macRaw);
             const ident = escaparHtml(item.identity || 'Host Externo');
+            const proto = escaparHtml(item.protocol || 'UDP/TCP');
+            const hostname = escaparHtml(item.hostname || '');
+            const vendor = escaparHtml(item.vendor || '');
+            const esLan = item.is_lan !== undefined
+                ? Boolean(item.is_lan)
+                : (macRaw.includes('-') && !macRaw.includes('WAN'));
             const regla = escaparHtml(item.rule_name || `CyberShield_Block_${ip}`);
             const esPermanente = Boolean(item.is_permanent);
             const flujosMitigados = Number(item.mitigated_flows || 0);
             const badgeMitigados = flujosMitigados > 0
                 ? `<div class="mt-1"><span class="badge bg-success-subtle text-success border border-success-subtle" title="Ráfagas de ataque posteriores interceptadas y descartadas por la cuarentena activa"><i class="bi bi-shield-fill-check me-1"></i>${flujosMitigados} flujos neutralizados</span></div>`
+                : '';
+
+            const subDetalleIdentidad = (hostname || vendor)
+                ? `<div class="text-secondary mt-1" style="font-size: 0.74rem;">
+                       ${hostname ? `<span class="me-2"><i class="bi bi-pc-display me-1"></i><strong>Host:</strong> ${hostname}</span>` : ''}
+                       ${vendor ? `<span><i class="bi bi-cpu me-1"></i><strong>NIC/ISP:</strong> ${vendor}</span>` : ''}
+                   </div>`
                 : '';
 
             const htmlExpiracion = esPermanente
@@ -136,11 +216,21 @@
             return `
                 <tr>
                     <td class="fw-bold text-danger">
-                        <i class="bi bi-slash-circle-fill me-1"></i>${ip}
+                        <div class="d-flex align-items-center gap-1 flex-wrap">
+                            <span><i class="bi bi-slash-circle-fill me-1"></i>${ip}</span>
+                            <span class="badge bg-danger-subtle text-danger" style="font-size: 0.68rem;">${proto}</span>
+                            <span class="badge ${esLan ? 'bg-info-subtle text-info' : 'bg-warning-subtle text-warning'}" style="font-size: 0.68rem;">${esLan ? 'LAN' : 'WAN'}</span>
+                        </div>
                         ${badgeMitigados}
                     </td>
-                    <td><code>${mac}</code></td>
-                    <td>${ident}</td>
+                    <td>
+                        <code class="fw-bold">${mac}</code>
+                        ${esLan && macRaw.includes('-') ? `<div class="text-muted" style="font-size: 0.7rem;">Física ARP L2</div>` : ''}
+                    </td>
+                    <td>
+                        <div class="fw-semibold">${ident}</div>
+                        ${subDetalleIdentidad}
+                    </td>
                     <td><span class="badge bg-dark-subtle text-dark font-monospace">${regla}</span></td>
                     <td>${htmlExpiracion}</td>
                     <td class="text-end">
@@ -153,11 +243,52 @@
         }).join('');
     }
 
+    function filtrarEventosCincoPasos(lista) {
+        const q = normalizarTextoBusqueda(inputBuscarEventosSoar ? inputBuscarEventosSoar.value : '');
+        const qMac = q.replace(/:/g, '-');
+        const estadoFiltro = selectFiltroEstadoEventos ? selectFiltroEstadoEventos.value : 'all';
+
+        return lista.filter((ev) => {
+            const bloqueada = Boolean(ev.is_blocked);
+            if (estadoFiltro === 'blocked' && !bloqueada) return false;
+            if (estadoFiltro === 'monitored' && bloqueada) return false;
+
+            if (!q) return true;
+
+            const s = ev.steps || {};
+            const p2 = s.step2_lan || {};
+            const p3 = s.step3_wan || {};
+            const p5 = s.step5_firewall || {};
+
+            const campos = [
+                ev.src_ip,
+                ev.protocol,
+                p2.mac,
+                String(p2.mac || '').replace(/-/g, ':'),
+                p2.hostname,
+                p2.vendor,
+                p2.device_nature,
+                p2.detail,
+                p3.country,
+                p3.isp,
+                p3.asn,
+                p3.attacker_type,
+                p5.rule_name,
+                p5.badge
+            ].map(normalizarTextoBusqueda);
+
+            return campos.some((c) => c.includes(q) || (qMac && c.includes(qMac)));
+        });
+    }
+
     function renderizarFlujoCincoPasos(eventos) {
         if (!contenedorFlujoCincoPasos) return;
-        if (kpiIncidentesSoar) kpiIncidentesSoar.textContent = String(eventos.length);
+        if (Array.isArray(eventos)) {
+            eventosLocal = eventos;
+        }
+        if (kpiIncidentesSoar) kpiIncidentesSoar.textContent = String(eventosLocal.length);
 
-        if (!eventos.length) {
+        if (!eventosLocal.length) {
             contenedorFlujoCincoPasos.innerHTML = `
                 <div class="text-center text-muted py-4">
                     <i class="bi bi-radar fs-3 d-block mb-2 text-info"></i>
@@ -167,7 +298,19 @@
             return;
         }
 
-        contenedorFlujoCincoPasos.innerHTML = eventos.map((ev, idx) => {
+        const eventosFiltrados = filtrarEventosCincoPasos(eventosLocal);
+        if (!eventosFiltrados.length) {
+            const termino = escaparHtml(inputBuscarEventosSoar ? inputBuscarEventosSoar.value : '');
+            contenedorFlujoCincoPasos.innerHTML = `
+                <div class="text-center text-muted py-4">
+                    <i class="bi bi-search fs-3 d-block mb-2 text-secondary"></i>
+                    No se encontraron investigaciones que coincidan con el filtro <strong>"${termino}"</strong>.
+                </div>
+            `;
+            return;
+        }
+
+        contenedorFlujoCincoPasos.innerHTML = eventosFiltrados.map((ev, idx) => {
             const ip = escaparHtml(ev.src_ip);
             const proto = escaparHtml(ev.protocol || 'TCP');
             const conf = Number(ev.confidence_percentage || 99).toFixed(1);
@@ -180,6 +323,9 @@
             const p4 = s.step4_sans || {};
             const p5 = s.step5_firewall || {};
             const idSelectTarjeta = `selDurCard_${idx}`;
+            const macEvento = (p2.applicable && p2.mac && p2.mac !== 'N/A (Tráfico WAN)')
+                ? `<span class="badge bg-secondary-subtle text-dark font-monospace border" title="Dirección MAC Física del Atacante LAN"><i class="bi bi-hdd-network me-1"></i>MAC: ${escaparHtml(p2.mac)}</span>`
+                : '';
 
             const btnAccion = bloqueada
                 ? `<button class="btn btn-sm btn-success rounded-pill px-3 fw-semibold" onclick="desbloquearIpAccion('${ip}')">
@@ -216,6 +362,7 @@
                     <div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3 pb-2 border-bottom">
                         <div class="d-flex align-items-center gap-2 flex-wrap">
                             <span class="badge bg-dark font-monospace fs-6 px-3 py-1">${ip}</span>
+                            ${macEvento}
                             <span class="badge bg-danger-subtle text-danger fw-bold">${proto} • Confianza ${conf}%</span>
                             <span class="badge ${ev.is_lan ? 'bg-info-subtle text-info' : 'bg-warning-subtle text-warning'}">
                                 ${ev.is_lan ? 'Origen Red Local (LAN)' : 'Origen Público (WAN)'}
@@ -390,25 +537,73 @@
         await window.bloquearIpAccion(ip, protocolo, modo);
     };
 
-    window.desbloquearIpAccion = async function (ip) {
-        if (!ip) return;
+    window.desbloquearIpAccion = async function (ipOReferencia) {
+        if (!ipOReferencia) return;
         try {
             const resp = await fetch('/api/soar/unblock', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ip: ip.trim(), protocol: 'TCP' })
+                body: JSON.stringify({ ip: ipOReferencia.trim(), protocol: 'TCP' })
             });
             const datos = await resp.json().catch(() => ({}));
             if (!resp.ok) {
-                mostrarNotificacionSoar(datos.detail || 'No se pudo desbloquear la IP', true);
+                mostrarNotificacionSoar(datos.detail || 'No se pudo desbloquear la referencia indicada', true);
                 return;
             }
-            mostrarNotificacionSoar(`IP ${ip} desbloqueada inmediatamente y regla ${datos.rule_name} eliminada`, false);
+            const ipResuelta = datos.unblocked_ip || ipOReferencia;
+            const macInfo = (datos.mac && datos.mac !== 'N/A (WAN)') ? ` [MAC: ${datos.mac}]` : '';
+            mostrarNotificacionSoar(`Atacante ${ipResuelta}${macInfo} desbloqueado y regla ${datos.rule_name} eliminada`, false);
             await cargarDashboardSoar();
         } catch (_) {
-            mostrarNotificacionSoar('Error al desbloquear IP', true);
+            mostrarNotificacionSoar('Error al desbloquear IP/Referencia', true);
         }
     };
+
+    window.limpiarBusquedaCuarentena = function () {
+        if (inputBuscarCuarentena) inputBuscarCuarentena.value = '';
+        if (selectFiltroCuarentena) selectFiltroCuarentena.value = 'all';
+        renderizarTablaCuarentena();
+    };
+
+    window.desbloquearPorReferenciaBuscada = async function () {
+        const refTexto = (inputBuscarCuarentena ? inputBuscarCuarentena.value : '').trim();
+        const filtrados = filtrarItemsCuarentena(cuarentenaLocal);
+
+        if (!refTexto && filtrados.length !== 1) {
+            mostrarNotificacionSoar(
+                'Escriba en el buscador una referencia del atacante (IP, MAC, Hostname, Fabricante o Regla) para desbloquearlo',
+                true
+            );
+            if (inputBuscarCuarentena) inputBuscarCuarentena.focus();
+            return;
+        }
+
+        const objetivo = filtrados.length === 1 ? filtrados[0].ip : refTexto;
+        await window.desbloquearIpAccion(objetivo);
+        if (inputBuscarCuarentena && filtrados.length <= 1) {
+            inputBuscarCuarentena.value = '';
+            renderizarTablaCuarentena();
+        }
+    };
+
+    if (inputBuscarCuarentena) {
+        inputBuscarCuarentena.addEventListener('input', () => renderizarTablaCuarentena());
+        inputBuscarCuarentena.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') {
+                ev.preventDefault();
+                window.desbloquearPorReferenciaBuscada();
+            }
+        });
+    }
+    if (selectFiltroCuarentena) {
+        selectFiltroCuarentena.addEventListener('change', () => renderizarTablaCuarentena());
+    }
+    if (inputBuscarEventosSoar) {
+        inputBuscarEventosSoar.addEventListener('input', () => renderizarFlujoCincoPasos());
+    }
+    if (selectFiltroEstadoEventos) {
+        selectFiltroEstadoEventos.addEventListener('change', () => renderizarFlujoCincoPasos());
+    }
 
     window.bloquearIpManualInput = async function () {
         const ip = (inputIpManualBloquear ? inputIpManualBloquear.value : '').trim();

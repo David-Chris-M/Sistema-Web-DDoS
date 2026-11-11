@@ -299,18 +299,45 @@
         <div class="row g-4 mb-4">
             <div class="col-lg-8">
                 <div class="chart-card h-100">
-                    <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-2">
                         <div>
                             <h6 class="fw-bold mb-0 text-dark">
                                 <i class="bi bi-fire text-danger me-1"></i> Tabla de Cuarentena Activa en Firewall y Feed Perimetral EDL
                             </h6>
-                            <small class="text-muted">Muestra claramente si una regla es <strong>Permanente (Hasta desbloqueo manual)</strong> o <strong>Cuenta regresiva 15m (IPS)</strong></small>
+                            <small class="text-muted">Identifique y desbloquee por <strong>IP, Dirección MAC, Nombre de Equipo (Hostname), Fabricante o Regla</strong></small>
                         </div>
                         <div class="d-flex align-items-center gap-2">
                             <a href="/api/soar/blocklist.txt" target="_blank" class="btn btn-sm btn-outline-dark py-0 px-2 small">
                                 <i class="bi bi-file-earmark-code me-1"></i>/api/soar/blocklist.txt
                             </a>
                             <span class="badge bg-danger-subtle text-danger fw-semibold" id="badgeTotalCuarentena">0 reglas activas</span>
+                        </div>
+                    </div>
+
+                    <!-- Barra de Búsqueda y Desbloqueo por Referencia (IP / MAC / Hostname / Regla) -->
+                    <div class="row g-2 mb-3 align-items-center">
+                        <div class="col-md-6">
+                            <div class="input-group input-group-sm">
+                                <span class="input-group-text bg-light"><i class="bi bi-search text-secondary"></i></span>
+                                <input type="text" class="form-control" id="inputBuscarCuarentena" placeholder="Buscar bloqueado por IP, MAC (ej. F8-AC), Nombre PC, Fabricante o Regla...">
+                                <button class="btn btn-outline-secondary" type="button" onclick="limpiarBusquedaCuarentena()" title="Limpiar búsqueda">
+                                    <i class="bi bi-x-lg"></i>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <select class="form-select form-select-sm" id="selectFiltroCuarentena">
+                                <option value="all" selected>Todos los bloqueados</option>
+                                <option value="lan">Red Local (LAN)</option>
+                                <option value="wan">Externos (WAN)</option>
+                                <option value="permanent">Solo Permanentes</option>
+                                <option value="15m">Solo Temporales (15m)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <button class="btn btn-sm btn-outline-success w-100 fw-semibold" type="button" onclick="desbloquearPorReferenciaBuscada()" title="Desbloquea usando la IP, MAC, Hostname o Regla ingresada en la barra de búsqueda">
+                                <i class="bi bi-unlock-fill me-1"></i> Desbloquear por Referencia
+                            </button>
                         </div>
                     </div>
 
@@ -397,7 +424,18 @@
                         (1) Anti-Spoofing TTL RFC 4732 • (2) OUI/VM Puente/LAA + Huella TTL NAT LAN • (3) País + ISP + Clasificador VPS/Cloud WAN • (4) SANS ISC DShield • (5) Mitigación Firewall
                     </small>
                 </div>
-                <span class="badge bg-info-subtle text-info fw-semibold">Pipeline Asíncrono No-Bloqueante</span>
+                <div class="d-flex align-items-center gap-2 flex-wrap">
+                    <div class="input-group input-group-sm" style="width: 310px;">
+                        <span class="input-group-text bg-light"><i class="bi bi-search text-secondary"></i></span>
+                        <input type="text" class="form-control" id="inputBuscarEventosSoar" placeholder="Buscar por IP, MAC, Hostname, ISP o Proto...">
+                    </div>
+                    <select class="form-select form-select-sm" id="selectFiltroEstadoEventos" style="width: auto;">
+                        <option value="all" selected>Todos los incidentes</option>
+                        <option value="blocked">Solo Bloqueados</option>
+                        <option value="monitored">Solo Monitoreados</option>
+                    </select>
+                    <span class="badge bg-info-subtle text-info fw-semibold">Pipeline Asíncrono No-Bloqueante</span>
+                </div>
             </div>
 
             <div id="contenedorFlujoCincoPasos">
@@ -479,7 +517,7 @@
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/frontend/js/alarma_global.js?v=16"></script>
-    <script src="/frontend/js/soar.js?v=16"></script>
+    <script src="/frontend/js/alarma_global.js?v=17"></script>
+    <script src="/frontend/js/soar.js?v=17"></script>
 </body>
 </html>
