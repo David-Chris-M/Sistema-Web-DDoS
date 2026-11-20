@@ -41,7 +41,7 @@ def ejecutar_auditoria_produccion() -> bool:
 
         # 2. Metadatos del Modelo
         r = cliente.get("/api/model")
-        afirmar_prueba("Metadata Conv1D", r.status_code == 200 and r.json().get("n_features") == N_CANONICO)
+        afirmar_prueba("Metadata Conv1D", r.status_code == 200 and r.json().get("n_features") == 77)
 
         # 3. Autenticación de Ingesta
         flujo_simulado = {

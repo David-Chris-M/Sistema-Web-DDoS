@@ -577,11 +577,11 @@ REDES_CDN_CLOUD_CONOCIDAS = (
 
 
 def _detectar_ips_locales_servidor() -> set[str]:
-    ips = {"127.0.0.1", "192.168.18.10"}
+    ips = {"127.0.0.1"}
     ip_env = (os.getenv("LOCAL_HOST_IP") or "").strip()
     if ip_env:
         ips.add(ip_env)
-    for destino in (("192.168.18.1", 80), ("8.8.8.8", 80)):
+    for destino in (("8.8.8.8", 80), ("1.1.1.1", 80)):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect(destino)
@@ -590,6 +590,12 @@ def _detectar_ips_locales_servidor() -> set[str]:
                     ips.add(ip_local)
         except Exception:
             pass
+    try:
+        for ip_local in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if ip_local and not ip_local.startswith("169.254."):
+                ips.add(ip_local)
+    except Exception:
+        pass
     return ips
 
 
@@ -613,7 +619,7 @@ def _es_puerto_servicio_cdn_cloud(puerto: int) -> bool:
 
 
 def _es_puerto_efimero_local(puerto: int) -> bool:
-    return puerto >= 1024 and puerto not in (8000, 8080, 8443, 9999)
+    return puerto >= 1024 and puerto not in (8000, 8080, 8443)
 
 
 def _es_ip_cdn_cloud_conocida(ip_obj: ipaddress._BaseAddress) -> bool:
@@ -629,8 +635,6 @@ def _es_trafico_cdn_cloud_benigno(r: RegistroFlujo) -> bool:
         return False
     puerto_origen = int(round(r.features[0]))
     puerto_destino = int(round(r.features[1]))
-    if puerto_origen == 9999 or puerto_destino == 9999:
-        return False
     try:
         ip_src = ipaddress.ip_address(str(r.src_ip))
         ip_dst = ipaddress.ip_address(str(r.dst_ip))
@@ -668,8 +672,6 @@ def _es_trafico_solicitado_conntrack(r: RegistroFlujo, ahora_mono: float) -> boo
 
     puerto_origen = int(round(r.features[0]))
     puerto_destino = int(round(r.features[1]))
-    if puerto_origen == 9999 or puerto_destino == 9999:
-        return False
 
     try:
         ip_src = ipaddress.ip_address(str(r.src_ip))
@@ -820,7 +822,7 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
     tiempo_actual = obtener_utc_ingenuo()
     ahora_mono = time.monotonic()
     umbral_base = _umbral_decision_activo
-    umbral_sensor = max(0.75, umbral_base)
+    umbral_sensor = umbral_base
     filas_bd = []
     metadatos_ws = []
 
@@ -848,10 +850,7 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
         etiqueta_estado = None
 
         if origen == "sensor":
-            puerto_origen = int(round(r.features[0])) if len(r.features) > 1 else 0
-            puerto_destino = int(round(r.features[1])) if len(r.features) > 1 else 0
-            es_puerto_testbed = (puerto_origen == 9999 or puerto_destino == 9999)
-            es_iniciador_local = (str(r.src_ip) in _IPS_PROPIAS_SERVIDOR and not es_puerto_testbed)
+            es_iniciador_local = (str(r.src_ip) in _IPS_PROPIAS_SERVIDOR and str(r.src_ip) != str(r.dst_ip))
             es_cdn_cloud_benigno = _es_trafico_cdn_cloud_benigno(r)
             es_ataque_entrante_lan = (
                 str(r.src_ip) not in _IPS_PROPIAS_SERVIDOR
@@ -868,7 +867,7 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
                 if prob > 0.50:
                     prob = round(0.05 + (prob * 0.10), 4)
             elif prob > umbral_sensor:
-                if total_rafaga_reciente >= MIN_FLUJOS_RAFAGA_DDOS or es_puerto_testbed or es_ataque_entrante_lan:
+                if total_rafaga_reciente >= MIN_FLUJOS_RAFAGA_DDOS or es_ataque_entrante_lan:
                     es_ddos = True
                 else:
                     es_ddos = False

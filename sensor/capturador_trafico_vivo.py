@@ -22,6 +22,21 @@ except ImportError:  # pragma: no cover
     TIENE_SCAPY = False
 
 # --- 0. Configuración y Carga de Variables de Entorno ---
+def _limpiar_valor_env(valor_crudo: str) -> str:
+    valor = valor_crudo.strip()
+    if not valor:
+        return ""
+    if valor[0] in ("'", '"'):
+        comilla = valor[0]
+        idx_cierre = valor.find(comilla, 1)
+        if idx_cierre != -1:
+            return valor[1:idx_cierre].strip()
+        return valor[1:].strip()
+    if "#" in valor:
+        valor = valor.split("#", 1)[0].strip()
+    return valor
+
+
 _directorio_base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _archivo_env = os.path.join(_directorio_base, ".env")
 if os.path.exists(_archivo_env):
@@ -31,7 +46,9 @@ if os.path.exists(_archivo_env):
                 _linea = _linea.strip()
                 if _linea and not _linea.startswith("#") and "=" in _linea:
                     _clave, _valor = _linea.split("=", 1)
-                    os.environ.setdefault(_clave.strip(), _valor.strip())
+                    _clave_limpia = _clave.strip()
+                    if _clave_limpia:
+                        os.environ.setdefault(_clave_limpia, _limpiar_valor_env(_valor))
     except Exception:
         pass
 
@@ -49,7 +66,7 @@ MAXIMO_COLA_LISTOS = int(os.getenv("MAX_READY_FLOWS", str(MAXIMO_FLUJOS_ACTIVOS 
 INTERVALO_VACIADO_SEGUNDOS = float(os.getenv("FLUSH_INTERVAL", "0.3"))
 TAMANO_MAXIMO_LOTE = int(os.getenv("MAX_BATCH", "500"))
 SNAPLEN_CAPTURA = int(os.getenv("CAPTURE_SNAPLEN", "96"))
-BYTES_CABECERA_UDP = 20
+BYTES_CABECERA_UDP = 8
 
 registro_logger = logging.getLogger("cybershield.sensor")
 
@@ -125,22 +142,38 @@ def _parsear_trama_binaria_rapida(trama: bytes, marca_tiempo: float):
     if longitud_trama < 20:
         return None
 
-    offset_ip = 0
-    primer_nibble = trama[0] >> 4
-    if primer_nibble != 4:
-        if longitud_trama < 34:
-            return None
+    offset_ip = None
+    eth_type = None
+    if longitud_trama >= 34:
         eth_type = struct.unpack_from("!H", trama, 12)[0]
-        offset_ip = 14
-        if eth_type == 0x8100:
-            if longitud_trama < 38:
-                return None
-            eth_type = struct.unpack_from("!H", trama, 16)[0]
-            offset_ip = 18
-        if eth_type != 0x0800:
-            return None
+        if eth_type == 0x0800:
+            cand_ver_ihl = trama[14]
+            cand_ihl = (cand_ver_ihl & 0x0F) * 4
+            if (cand_ver_ihl >> 4) == 4 and cand_ihl >= 20 and longitud_trama >= 14 + cand_ihl:
+                cand_total = struct.unpack_from("!H", trama, 16)[0]
+                if cand_total == 0 or cand_total >= cand_ihl:
+                    offset_ip = 14
+        elif eth_type == 0x8100 and longitud_trama >= 38:
+            vlan_eth_type = struct.unpack_from("!H", trama, 16)[0]
+            if vlan_eth_type == 0x0800:
+                cand_ver_ihl = trama[18]
+                cand_ihl = (cand_ver_ihl & 0x0F) * 4
+                if (cand_ver_ihl >> 4) == 4 and cand_ihl >= 20 and longitud_trama >= 18 + cand_ihl:
+                    cand_total = struct.unpack_from("!H", trama, 20)[0]
+                    if cand_total == 0 or cand_total >= cand_ihl:
+                        offset_ip = 18
 
-    if longitud_trama < offset_ip + 20:
+    if offset_ip is None:
+        if eth_type in (0x0806, 0x86DD, 0x88CC, 0x8100, 0x88A8, 0x8863, 0x8864):
+            return None
+        raw_ver_ihl = trama[0]
+        raw_ihl = (raw_ver_ihl & 0x0F) * 4
+        if (raw_ver_ihl >> 4) == 4 and raw_ihl >= 20 and longitud_trama >= raw_ihl:
+            raw_total = struct.unpack_from("!H", trama, 2)[0]
+            if (raw_total == 0 or raw_total >= raw_ihl) and trama[9] in (1, 6, 17):
+                offset_ip = 0
+
+    if offset_ip is None or longitud_trama < offset_ip + 20:
         return None
 
     ver_ihl, _tos, ip_total_len, _id, _frag, _ttl, proto, _csum, src_raw, dst_raw = struct.unpack_from(
@@ -186,6 +219,8 @@ def _parsear_trama_binaria_rapida(trama: bytes, marca_tiempo: float):
         )
 
     if proto == 1:
+        if longitud_trama < offset_l4 + 8:
+            return None
         longitud_datos = max(0, ip_total_len - ihl_bytes - 8)
         return (
             marca_tiempo, ip_origen, 0, ip_destino, 0,
@@ -195,10 +230,22 @@ def _parsear_trama_binaria_rapida(trama: bytes, marca_tiempo: float):
     return None
 
 
+def _es_ipv4_privada_rfc1918(ip_str: str) -> bool:
+    if not ip_str:
+        return False
+    if ip_str.startswith(("192.168.", "10.")):
+        return True
+    if ip_str.startswith("172."):
+        partes = ip_str.split(".")
+        if len(partes) == 4 and partes[1].isdigit():
+            return 16 <= int(partes[1]) <= 31
+    return False
+
+
 def _detectar_red_host_principal():
     ip_host = (os.getenv("LOCAL_HOST_IP") or "").strip()
     if not ip_host:
-        for destino_prueba in (("192.168.18.1", 80), ("8.8.8.8", 80)):
+        for destino_prueba in (("8.8.8.8", 80), ("1.1.1.1", 80)):
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
                     sock.connect(destino_prueba)
@@ -208,6 +255,15 @@ def _detectar_red_host_principal():
                         break
             except Exception:
                 pass
+
+    if not ip_host:
+        try:
+            for candidata in socket.gethostbyname_ex(socket.gethostname())[2]:
+                if candidata and not candidata.startswith(("127.", "169.254.")):
+                    ip_host = candidata
+                    break
+        except Exception:
+            pass
 
     interfaz_env = (os.getenv("SNIFF_IFACE") or "").strip()
     interfaz_elegida = interfaz_env or None
@@ -225,32 +281,22 @@ def _detectar_red_host_principal():
                 for iface in interfaces_activas:
                     ip_if = getattr(iface, "ip", "") or ""
                     desc_if = f"{getattr(iface, 'name', '')} {getattr(iface, 'description', '')}".lower()
-                    if ip_if.startswith("192.168.18.") and not any(v in desc_if for v in palabras_virtuales):
+                    if _es_ipv4_privada_rfc1918(ip_if) and not any(v in desc_if for v in palabras_virtuales):
                         ip_host = ip_if
                         break
-                if not ip_host:
-                    for iface in interfaces_activas:
-                        ip_if = getattr(iface, "ip", "") or ""
-                        desc_if = f"{getattr(iface, 'name', '')} {getattr(iface, 'description', '')}".lower()
-                        if ip_if.startswith(("192.168.", "10.")) and not any(v in desc_if for v in palabras_virtuales):
-                            ip_host = ip_if
-                            break
 
             if not interfaz_elegida:
                 mejor_iface = None
-                for iface in interfaces_activas:
-                    ip_if = getattr(iface, "ip", "") or ""
-                    desc_if = f"{getattr(iface, 'name', '')} {getattr(iface, 'description', '')}".lower()
-                    if ip_host and ip_if == ip_host:
-                        mejor_iface = iface
-                        break
-                    if ip_if.startswith("192.168.18.") and not any(v in desc_if for v in palabras_virtuales):
-                        mejor_iface = iface
+                if ip_host:
+                    for iface in interfaces_activas:
+                        if (getattr(iface, "ip", "") or "") == ip_host:
+                            mejor_iface = iface
+                            break
                 if mejor_iface is None:
                     for iface in interfaces_activas:
                         ip_if = getattr(iface, "ip", "") or ""
                         desc_if = f"{getattr(iface, 'name', '')} {getattr(iface, 'description', '')}".lower()
-                        if ip_if.startswith(("192.168.", "10.")) and not any(v in desc_if for v in palabras_virtuales):
+                        if _es_ipv4_privada_rfc1918(ip_if) and not any(v in desc_if for v in palabras_virtuales):
                             mejor_iface = iface
                             break
                 if mejor_iface is not None:
@@ -264,9 +310,11 @@ def _detectar_red_host_principal():
             pass
 
     if not ip_host:
-        ip_host = "192.168.18.10"
+        ip_host = "127.0.0.1"
 
-    ips_propias = {ip_host, "127.0.0.1", "192.168.18.10"}
+    ips_propias = {"127.0.0.1"}
+    if ip_host:
+        ips_propias.add(ip_host)
     return ip_host, ips_propias, interfaz_elegida, etiqueta_interfaz
 
 
@@ -352,7 +400,7 @@ class EstadisticasFlujo:
                 else None
             )
         elif self.protocolo == 17:
-            self.paquetes_datos_ida = 0
+            self.paquetes_datos_ida = sum(1 for x in self.longitudes_ida if x > 0)
             self.segmento_minimo_ida = BYTES_CABECERA_UDP if self.longitudes_ida else None
         else:
             self.paquetes_datos_ida = 0
@@ -387,9 +435,9 @@ class EstadisticasFlujo:
                 self.tiempos_inactivos.append(intervalo_inactividad_us)
             self.inicio_activo = self.fin_activo = marca_tiempo
         else:
-            self.fin_activo = marca_tiempo
+            self.fin_activo = max(self.fin_activo, marca_tiempo)
 
-        self.tiempo_ultimo = marca_tiempo
+        self.tiempo_ultimo = max(self.tiempo_ultimo, marca_tiempo)
         if self.longitud_primer_paquete is None:
             self.longitud_primer_paquete = longitud_datos
 
@@ -418,8 +466,7 @@ class EstadisticasFlujo:
                     self.ventana_inicial_ida = ventana_tcp
                 if longitud_datos > 0:
                     self.paquetes_datos_ida += 1
-                if len(self.longitudes_ida) == 1:
-                    self.psh_ida |= bool(banderas_tcp & 0x08)
+                self.psh_ida |= bool(banderas_tcp & 0x08)
                 self.urg_ida |= bool(banderas_tcp & 0x20)
             else:
                 self.longitud_cabecera_vuelta += cabecera_l4
@@ -430,21 +477,21 @@ class EstadisticasFlujo:
 
             if banderas_tcp:
                 if banderas_tcp & 0x01:
-                    self.banderas_tcp["FIN"] = 1
+                    self.banderas_tcp["FIN"] += 1
                 if banderas_tcp & 0x02:
-                    self.banderas_tcp["SYN"] = 1
+                    self.banderas_tcp["SYN"] += 1
                 if banderas_tcp & 0x04:
-                    self.banderas_tcp["RST"] = 1
+                    self.banderas_tcp["RST"] += 1
                 if banderas_tcp & 0x08:
-                    self.banderas_tcp["PSH"] = 1
+                    self.banderas_tcp["PSH"] += 1
                 if banderas_tcp & 0x10:
-                    self.banderas_tcp["ACK"] = 1
+                    self.banderas_tcp["ACK"] += 1
                 if banderas_tcp & 0x20:
-                    self.banderas_tcp["URG"] = 1
+                    self.banderas_tcp["URG"] += 1
                 if banderas_tcp & 0x40:
-                    self.banderas_tcp["ECE"] = 1
+                    self.banderas_tcp["ECE"] += 1
                 if banderas_tcp & 0x80:
-                    self.banderas_tcp["CWR"] = 1
+                    self.banderas_tcp["CWR"] += 1
                 if banderas_tcp & 0x05:
                     self.cerrado_por_bandera = True
 
@@ -452,6 +499,8 @@ class EstadisticasFlujo:
             if es_ida:
                 self.longitud_cabecera_ida += BYTES_CABECERA_UDP
                 self.segmento_minimo_ida = BYTES_CABECERA_UDP
+                if longitud_datos > 0:
+                    self.paquetes_datos_ida += 1
             else:
                 self.longitud_cabecera_vuelta += BYTES_CABECERA_UDP
 
@@ -611,7 +660,6 @@ class TablaFlujos:
 
         es_origen_local = _es_ip_local_privada(ip_origen)
         es_destino_local = _es_ip_local_privada(ip_destino)
-        es_puerto_testbed = (puerto_origen == 9999 or puerto_destino == 9999)
         es_nuevo_syn_puro = (proto == 6 and (banderas_tcp & 0x12) == 0x02)
         es_rst_puro = (proto == 6 and (banderas_tcp & 0x04) != 0 and longitud_datos == 0)
 
@@ -646,38 +694,18 @@ class TablaFlujos:
                     sesion is not None
                     and (marca_tiempo - sesion["ultimo_visto"]) <= ttl_sesion
                     and not es_nuevo_syn_puro
-                    and not es_puerto_testbed
                 ):
-                    if es_origen_local and not es_rst_puro and not _es_ip_local_privada(sesion["clave_direccion"][0]):
+                    if es_origen_local and not es_destino_local and not es_rst_puro and not _es_ip_local_privada(sesion["clave_direccion"][0]):
                         sesion["clave_direccion"] = clave_ida
                     clave_elegida = sesion["clave_direccion"]
                     es_ida = (clave_ida == clave_elegida)
                     es_midstream = bool(sesion["es_midstream"]) and not bool(sesion["sesion_local_confirmada"])
-                    sesion["ultimo_visto"] = marca_tiempo
+                    sesion["ultimo_visto"] = max(sesion["ultimo_visto"], marca_tiempo)
                     self.sesiones_activas.move_to_end(clave_canonica)
-                elif es_puerto_testbed:
-                    if puerto_origen == 9999 and puerto_destino != 9999:
-                        clave_elegida = clave_retorno
-                        es_ida = False
-                    else:
-                        clave_elegida = clave_ida
-                        es_ida = True
-                    es_midstream = False
-                    self.sesiones_activas[clave_canonica] = {
-                        "clave_direccion": clave_elegida,
-                        "ultimo_visto": marca_tiempo,
-                        "es_midstream": False,
-                        "pkts_locales_historicos": 0,
-                        "sesion_local_confirmada": False,
-                    }
-                    self.sesiones_activas.move_to_end(clave_canonica)
-                    while len(self.sesiones_activas) > self.MAXIMO_DIRECCIONES_PINNING:
-                        self.sesiones_activas.popitem(last=False)
                 else:
                     anclar_local_midstream = (
                         not es_origen_local
                         and es_destino_local
-                        and not es_puerto_testbed
                         and (
                             (proto == 6 and (banderas_tcp & 0x12) != 0x02 and (banderas_tcp & 0x04) == 0)
                             or (proto == 17 and _es_puerto_multimedia_o_web_udp(puerto_origen) and puerto_destino >= 1024)
@@ -725,8 +753,8 @@ class TablaFlujos:
 
             sesion_actual = self.sesiones_activas.get(clave_canonica)
             if sesion_actual is not None:
-                sesion_actual["ultimo_visto"] = marca_tiempo
-                if es_origen_local and not es_puerto_testbed and not es_rst_puro:
+                sesion_actual["ultimo_visto"] = max(sesion_actual["ultimo_visto"], marca_tiempo)
+                if es_origen_local and not es_destino_local and not es_rst_puro:
                     sesion_actual["pkts_locales_historicos"] += 1
                     sesion_actual["sesion_local_confirmada"] = True
                     sesion_actual["es_midstream"] = False
@@ -736,7 +764,7 @@ class TablaFlujos:
                     and (proto != 6 or (banderas_tcp & 0x04) == 0)
                 ):
                     sesion_actual["es_midstream"] = False
-                    if _es_ip_local_privada(flujo.ip_origen) and not es_puerto_testbed:
+                    if _es_ip_local_privada(flujo.ip_origen) and not _es_ip_local_privada(flujo.ip_destino):
                         sesion_actual["sesion_local_confirmada"] = True
                 if sesion_actual["sesion_local_confirmada"]:
                     flujo.sesion_local_confirmada = True
@@ -814,7 +842,7 @@ class TablaFlujos:
                 and flujo.anclado_midstream
                 and (
                     len(flujo.longitudes_ida) == 0
-                    or (flujo.banderas_tcp["RST"] == 1 and flujo.paquetes_datos_ida == 0)
+                    or (flujo.banderas_tcp["RST"] >= 1 and flujo.paquetes_datos_ida == 0)
                 )
             ):
                 flujo.invertir_direccion()
@@ -841,18 +869,22 @@ class TablaFlujos:
             if forzar_todos:
                 self.sesiones_activas.clear()
             else:
-                while self.sesiones_activas:
-                    _, sesion = next(iter(self.sesiones_activas.items()))
+                ttl_no_confirmada = TIEMPO_INACTIVIDAD_SEGUNDOS * 3.0
+                ttl_minimo = min(self.TTL_SESION_ACTIVA_SEGUNDOS, ttl_no_confirmada)
+                claves_a_expirar = []
+                for clave_ses, sesion in self.sesiones_activas.items():
+                    edad = tiempo_actual - sesion["ultimo_visto"]
+                    if edad <= ttl_minimo:
+                        break
                     ttl_sesion = (
                         self.TTL_SESION_ACTIVA_SEGUNDOS
                         if sesion.get("sesion_local_confirmada")
-                        else TIEMPO_INACTIVIDAD_SEGUNDOS
+                        else ttl_no_confirmada
                     )
-                    if (tiempo_actual - sesion["ultimo_visto"]) <= ttl_sesion:
-                        break
-                    if sesion["clave_direccion"] in self.flujos:
-                        break
-                    self.sesiones_activas.popitem(last=False)
+                    if edad > ttl_sesion and sesion["clave_direccion"] not in self.flujos:
+                        claves_a_expirar.append(clave_ses)
+                for clave_ses in claves_a_expirar:
+                    self.sesiones_activas.pop(clave_ses, None)
 
     expire = expirar_inactivos
 
@@ -894,6 +926,7 @@ class DespachadorApi(threading.Thread):
             self.sesion.headers["X-API-Key"] = clave_api
         self.estadisticas = {"enviados": 0, "ddos": 0, "descartados": 0, "errores": 0}
         self._bloqueo_estadisticas = threading.Lock()
+        self._evento_parada = threading.Event()
 
     def encolar_lote(self, registros: list) -> None:
         for i in range(0, len(registros), TAMANO_MAXIMO_LOTE):
@@ -908,43 +941,113 @@ class DespachadorApi(threading.Thread):
     submit = encolar_lote
 
     def detener(self, tiempo_espera: float = 10.0) -> None:
-        self.cola_envio.put(None)
-        self.cola_envio.join()
-        self.join(timeout=tiempo_espera)
+        limite = time.monotonic() + max(0.1, float(tiempo_espera))
+        self._evento_parada.set()
+        encolado = False
+        try:
+            self.cola_envio.put(None, timeout=min(1.0, max(0.05, limite - time.monotonic())))
+            encolado = True
+        except queue.Full:
+            try:
+                descartado = self.cola_envio.get_nowait()
+                self.cola_envio.task_done()
+                if isinstance(descartado, list):
+                    with self._bloqueo_estadisticas:
+                        self.estadisticas["descartados"] += len(descartado)
+            except queue.Empty:
+                pass
+            try:
+                self.cola_envio.put_nowait(None)
+                encolado = True
+            except queue.Full:
+                pass
+
+        restante = max(0.05, limite - time.monotonic())
+        if self.is_alive():
+            self.join(timeout=restante)
+        if not self.is_alive():
+            try:
+                self.sesion.close()
+            except Exception:
+                pass
+        elif not encolado:
+            registro_logger.warning("DespachadorApi no pudo encolar señal de cierre dentro de %.2fs", tiempo_espera)
 
     stop = detener
 
     def run(self) -> None:
+        max_intentos = 4
         while True:
             lote = self.cola_envio.get()
-            if lote is None:
-                self.cola_envio.task_done()
-                break
-            for intento in range(4):
-                try:
-                    respuesta = self.sesion.post(self.url_destino, json={"records": lote}, timeout=(3.05, 15))
-                    if respuesta.status_code == 200:
-                        datos_respuesta = respuesta.json()
-                        procesados = datos_respuesta.get("processed", len(lote))
-                        ataques = datos_respuesta.get("ddos", 0)
-                        with self._bloqueo_estadisticas:
-                            self.estadisticas["enviados"] += procesados
-                            self.estadisticas["ddos"] += ataques
-                        if ataques > 0:
-                            registro_logger.warning("ALERTA CRÍTICA: %d/%d flujos identificados como DDoS", ataques, procesados)
-                        break
-                    if 400 <= respuesta.status_code < 500 and respuesta.status_code != 429:
-                        registro_logger.error("Lote rechazado por API (Código %d): %s", respuesta.status_code, respuesta.text[:300])
+            try:
+                if lote is None:
+                    break
+                for intento in range(max_intentos):
+                    try:
+                        respuesta = self.sesion.post(self.url_destino, json={"records": lote}, timeout=(3.05, 15))
+                        if respuesta.status_code == 200:
+                            try:
+                                datos_respuesta = respuesta.json()
+                            except ValueError as exc_json:
+                                registro_logger.error("Respuesta HTTP 200 con JSON inválido: %s", exc_json)
+                                with self._bloqueo_estadisticas:
+                                    self.estadisticas["errores"] += 1
+                                break
+                            if not isinstance(datos_respuesta, dict):
+                                registro_logger.error(
+                                    "Respuesta HTTP 200 con estructura no-dict (%s); lote ignorado",
+                                    type(datos_respuesta).__name__,
+                                )
+                                with self._bloqueo_estadisticas:
+                                    self.estadisticas["errores"] += 1
+                                break
+                            procesados = int(datos_respuesta.get("processed", len(lote)))
+                            ataques = int(datos_respuesta.get("ddos", 0))
+                            with self._bloqueo_estadisticas:
+                                self.estadisticas["enviados"] += procesados
+                                self.estadisticas["ddos"] += ataques
+                            if ataques > 0:
+                                registro_logger.warning("ALERTA CRÍTICA: %d/%d flujos identificados como DDoS", ataques, procesados)
+                            break
+                        if 400 <= respuesta.status_code < 500 and respuesta.status_code != 429:
+                            registro_logger.error("Lote rechazado por API (Código %d): %s", respuesta.status_code, respuesta.text[:300])
+                            with self._bloqueo_estadisticas:
+                                self.estadisticas["errores"] += 1
+                            break
+                        registro_logger.warning(
+                            "Error transitorio de API (Código %d, intento %d/%d): %s",
+                            respuesta.status_code,
+                            intento + 1,
+                            max_intentos,
+                            respuesta.text[:200],
+                        )
                         with self._bloqueo_estadisticas:
                             self.estadisticas["errores"] += 1
-                        break
-                except requests.RequestException as excepcion:
-                    registro_logger.warning("Servidor API no disponible (intento %d/4): %s", intento + 1, excepcion)
-                time.sleep(0.5 * (2 ** intento))
-            else:
+                    except requests.RequestException as excepcion:
+                        registro_logger.warning(
+                            "Servidor API no disponible (intento %d/%d): %s",
+                            intento + 1,
+                            max_intentos,
+                            excepcion,
+                        )
+                        with self._bloqueo_estadisticas:
+                            self.estadisticas["errores"] += 1
+                    if intento < max_intentos - 1:
+                        if self._evento_parada.wait(0.5 * (2 ** intento)):
+                            with self._bloqueo_estadisticas:
+                                self.estadisticas["descartados"] += len(lote)
+                            break
+                else:
+                    with self._bloqueo_estadisticas:
+                        self.estadisticas["descartados"] += len(lote)
+            except Exception as exc_inesperada:
+                registro_logger.exception("Error inesperado en DespachadorApi: %s", exc_inesperada)
                 with self._bloqueo_estadisticas:
-                    self.estadisticas["descartados"] += len(lote)
-            self.cola_envio.task_done()
+                    self.estadisticas["errores"] += 1
+                    if isinstance(lote, list):
+                        self.estadisticas["descartados"] += len(lote)
+            finally:
+                self.cola_envio.task_done()
 
 
 # --- 4. Vaciado Periódico, Filtros BPF y Modo PCAP ---

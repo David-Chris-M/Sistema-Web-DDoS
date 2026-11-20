@@ -18,11 +18,11 @@ registro_logger = logging.getLogger("cybershield.inference")
 
 
 def _detectar_ips_locales_inferencia() -> set[str]:
-    ips = {"127.0.0.1", "192.168.18.10"}
+    ips = {"127.0.0.1"}
     ip_env = (os.getenv("LOCAL_HOST_IP") or "").strip()
     if ip_env:
         ips.add(ip_env)
-    for destino in (("192.168.18.1", 80), ("8.8.8.8", 80)):
+    for destino in (("8.8.8.8", 80), ("1.1.1.1", 80)):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
                 s.connect(destino)
@@ -31,6 +31,12 @@ def _detectar_ips_locales_inferencia() -> set[str]:
                     ips.add(ip_local)
         except Exception:
             pass
+    try:
+        for ip_local in socket.gethostbyname_ex(socket.gethostname())[2]:
+            if ip_local and not ip_local.startswith("169.254."):
+                ips.add(ip_local)
+    except Exception:
+        pass
     return ips
 
 
@@ -98,6 +104,18 @@ class MotorConv1DLigero:
         "Flatten",
         "Dense",
     }
+    PREFIJOS_H5_KERAS3 = {
+        "Conv1D": "conv1d",
+        "MaxPooling1D": "max_pooling1d",
+        "AveragePooling1D": "average_pooling1d",
+        "GlobalAveragePooling1D": "global_average_pooling1d",
+        "GlobalMaxPooling1D": "global_max_pooling1d",
+        "BatchNormalization": "batch_normalization",
+        "Dropout": "dropout",
+        "SpatialDropout1D": "spatial_dropout1d",
+        "Flatten": "flatten",
+        "Dense": "dense",
+    }
 
     def __init__(self, ruta_keras: str) -> None:
         import h5py
@@ -128,6 +146,7 @@ class MotorConv1DLigero:
             if grupo_capas is None:
                 raise NotImplementedError("Estructura HDF5 de pesos no estándar")
 
+            conteo_clase: dict[str, int] = {}
             for idx, capa in enumerate(capas_cfg):
                 clase = capa.get("class_name", "")
                 if clase not in self.CAPAS_SOPORTADAS:
@@ -135,6 +154,14 @@ class MotorConv1DLigero:
 
                 cfg = capa.get("config", {})
                 nombre_capa = cfg.get("name", "")
+                clave_h5 = nombre_capa
+                prefijo_h5 = self.PREFIJOS_H5_KERAS3.get(clase)
+                if prefijo_h5 is not None:
+                    occ = conteo_clase.get(prefijo_h5, 0)
+                    conteo_clase[prefijo_h5] = occ + 1
+                    clave_keras3 = prefijo_h5 if occ == 0 else f"{prefijo_h5}_{occ}"
+                    if clave_keras3 in grupo_capas:
+                        clave_h5 = clave_keras3
 
                 if idx == 0:
                     forma_lote = (
@@ -149,7 +176,7 @@ class MotorConv1DLigero:
                     continue
 
                 if clase == "Conv1D":
-                    self._agregar_conv1d(cfg, self._leer_vars_capa(grupo_capas, nombre_capa))
+                    self._agregar_conv1d(cfg, self._leer_vars_capa(grupo_capas, clave_h5))
                 elif clase == "MaxPooling1D":
                     self._agregar_pooling1d(cfg, modo="max")
                 elif clase == "AveragePooling1D":
@@ -159,13 +186,13 @@ class MotorConv1DLigero:
                 elif clase == "GlobalMaxPooling1D":
                     self._operaciones.append(lambda x: np.max(x, axis=1))
                 elif clase == "BatchNormalization":
-                    self._agregar_batchnorm(cfg, self._leer_vars_capa(grupo_capas, nombre_capa))
+                    self._agregar_batchnorm(cfg, self._leer_vars_capa(grupo_capas, clave_h5))
                 elif clase == "Flatten":
                     if cfg.get("data_format", "channels_last") != "channels_last":
                         raise NotImplementedError("Flatten channels_first requiere respaldo TensorFlow")
                     self._operaciones.append(lambda x: np.ascontiguousarray(x).reshape(x.shape[0], -1))
                 elif clase == "Dense":
-                    self._agregar_dense(cfg, self._leer_vars_capa(grupo_capas, nombre_capa))
+                    self._agregar_dense(cfg, self._leer_vars_capa(grupo_capas, clave_h5))
 
         if self.n_entrada <= 0:
             raise ValueError("No fue posible determinar la dimensión de entrada del modelo Conv1D")
@@ -185,6 +212,8 @@ class MotorConv1DLigero:
         stride = int(cfg.get("strides", [1])[0])
         dilatacion = int(cfg.get("dilation_rate", [1])[0])
         padding = str(cfg.get("padding", "valid")).lower()
+        if padding not in ("valid", "same"):
+            raise NotImplementedError(f"Padding '{padding}' en Conv1D requiere respaldo TensorFlow")
         usar_sesgo = bool(cfg.get("use_bias", True))
         activacion = cfg.get("activation", "linear")
         _aplicar_activacion(np.zeros((1, 1), dtype=np.float32), activacion)
@@ -204,8 +233,6 @@ class MotorConv1DLigero:
                 pad_der = pad_total - pad_izq
                 if pad_izq > 0 or pad_der > 0:
                     x = np.pad(x, ((0, 0), (pad_izq, pad_der), (0, 0)), mode="constant")
-            elif padding != "valid":
-                raise NotImplementedError(f"Padding '{padding}' no soportado en motor ligero")
 
             ventanas = sliding_window_view(x, k_efectivo, axis=1)
             if stride > 1 or dilatacion > 1:
@@ -226,6 +253,8 @@ class MotorConv1DLigero:
         strides_cfg = cfg.get("strides")
         stride = int(strides_cfg[0]) if strides_cfg else tam_pool
         padding = str(cfg.get("padding", "valid")).lower()
+        if padding not in ("valid", "same"):
+            raise NotImplementedError(f"Padding '{padding}' en Pooling1D requiere respaldo TensorFlow")
 
         if padding == "valid" and tam_pool == stride:
             if modo == "max":
@@ -252,9 +281,18 @@ class MotorConv1DLigero:
                 pad_total = max(0, (l_salida - 1) * stride + tam_pool - longitud)
                 pad_izq = pad_total // 2
                 pad_der = pad_total - pad_izq
-                val_pad = -np.inf if modo == "max" else 0.0
+                if modo == "max":
+                    if pad_izq > 0 or pad_der > 0:
+                        x = np.pad(x, ((0, 0), (pad_izq, pad_der), (0, 0)), mode="constant", constant_values=-np.inf)
+                    ventanas = sliding_window_view(x, tam_pool, axis=1)[:, ::stride, :, :]
+                    return np.max(ventanas, axis=-1)
+                mascara = np.ones((1, longitud, 1), dtype=np.float32)
                 if pad_izq > 0 or pad_der > 0:
-                    x = np.pad(x, ((0, 0), (pad_izq, pad_der), (0, 0)), mode="constant", constant_values=val_pad)
+                    x = np.pad(x, ((0, 0), (pad_izq, pad_der), (0, 0)), mode="constant", constant_values=0.0)
+                    mascara = np.pad(mascara, ((0, 0), (pad_izq, pad_der), (0, 0)), mode="constant", constant_values=0.0)
+                ventanas = sliding_window_view(x, tam_pool, axis=1)[:, ::stride, :, :]
+                conteos = np.maximum(np.sum(sliding_window_view(mascara, tam_pool, axis=1)[:, ::stride, :, :], axis=-1), np.float32(1.0))
+                return (np.sum(ventanas, axis=-1, dtype=np.float32) / conteos).astype(np.float32, copy=False)
             ventanas = sliding_window_view(x, tam_pool, axis=1)[:, ::stride, :, :]
             if modo == "max":
                 return np.max(ventanas, axis=-1)
@@ -352,7 +390,32 @@ class MotorInferencia:
 
             escalador = joblib.load(configuracion.ruta_escalador)
 
-            # 1. Inicialización del motor de inferencia
+            # 1. Lectura previa de metadatos
+            if os.path.exists(configuracion.ruta_metadatos):
+                with open(configuracion.ruta_metadatos, encoding="utf-8") as f_meta:
+                    self.metadatos = json.load(f_meta)
+
+            def _configurar_dimensiones(n_entrada_modelo: int) -> None:
+                n_escalador = int(getattr(escalador, "n_features_in_", n_entrada_modelo))
+                if n_escalador != n_entrada_modelo:
+                    raise ValueError(
+                        f"Escalador ({n_escalador}) y modelo ({n_entrada_modelo}) esperan dimensiones distintas"
+                    )
+                nombres = self.metadatos.get("feature_names") or (
+                    CARACTERISTICAS_CANONICAS if n_entrada_modelo == TOTAL_CANONICAS else None
+                )
+                if nombres is None or len(nombres) != n_entrada_modelo:
+                    raise ValueError("model_metadata.json no define 'feature_names' coherentes con el modelo")
+                desconocidas = [nom for nom in nombres if nom not in CARACTERISTICAS_CANONICAS]
+                if desconocidas:
+                    raise ValueError(f"Características desconocidas en metadata: {desconocidas}")
+
+                indices = np.array([CARACTERISTICAS_CANONICAS.index(nom) for nom in nombres])
+                self._indices_caracteristicas = None if np.array_equal(indices, np.arange(TOTAL_CANONICAS)) else indices
+                self._escalador = escalador
+                self.total_caracteristicas_modelo = n_entrada_modelo
+
+            # 2. Inicialización y precalentamiento del motor de inferencia (protegido por respaldo TF)
             self._motor_ligero = None
             self._funcion_grafo_tf = None
             self._tf = None
@@ -361,9 +424,14 @@ class MotorInferencia:
                 n_entrada = int(motor_ligero.n_entrada)
                 self._motor_ligero = motor_ligero
                 self.backend_activo = "conv1d_blas_ligero"
+                _configurar_dimensiones(n_entrada)
+                for tamano in (1, 64):
+                    self._predecir_sincrono(np.zeros((tamano, TOTAL_CANONICAS), dtype=np.float32))
             except Exception as exc_ligero:
+                self._motor_ligero = None
                 registro_logger.warning(
-                    "Activando respaldo TensorFlow para arquitectura extendida (%s)", exc_ligero
+                    "Activando respaldo TensorFlow para arquitectura extendida o error en precalentamiento (%s)",
+                    exc_ligero,
                 )
                 os.environ.setdefault("ONEDNN_PRIMITIVE_CACHE_CAPACITY", "16")
                 import tensorflow as tf
@@ -379,35 +447,9 @@ class MotorInferencia:
                 )
                 self._tf = tf
                 self.backend_activo = "tensorflow_fallback"
-
-            # 2. Validación de dimensiones y metadatos
-            n_escalador = int(getattr(escalador, "n_features_in_", n_entrada))
-            if n_escalador != n_entrada:
-                raise ValueError(f"Escalador ({n_escalador}) y modelo ({n_entrada}) esperan dimensiones distintas")
-
-            if os.path.exists(configuracion.ruta_metadatos):
-                with open(configuracion.ruta_metadatos, encoding="utf-8") as f_meta:
-                    self.metadatos = json.load(f_meta)
-
-            nombres = self.metadatos.get("feature_names") or (
-                CARACTERISTICAS_CANONICAS if n_entrada == TOTAL_CANONICAS else None
-            )
-            if nombres is None or len(nombres) != n_entrada:
-                raise ValueError("model_metadata.json no define 'feature_names' coherentes con el modelo")
-
-            desconocidas = [nom for nom in nombres if nom not in CARACTERISTICAS_CANONICAS]
-            if desconocidas:
-                raise ValueError(f"Características desconocidas en metadata: {desconocidas}")
-
-            indices = np.array([CARACTERISTICAS_CANONICAS.index(nom) for nom in nombres])
-            self._indices_caracteristicas = None if np.array_equal(indices, np.arange(TOTAL_CANONICAS)) else indices
-
-            self._escalador = escalador
-            self.total_caracteristicas_modelo = n_entrada
-
-            # 3. Precalentamiento
-            for tamano in (1, 64):
-                self._predecir_sincrono(np.zeros((tamano, TOTAL_CANONICAS), dtype=np.float32))
+                _configurar_dimensiones(n_entrada)
+                for tamano in (1, 64):
+                    self._predecir_sincrono(np.zeros((tamano, TOTAL_CANONICAS), dtype=np.float32))
 
             self.listo = True
             registro_logger.info(
@@ -428,24 +470,32 @@ class MotorInferencia:
         matriz_X: np.ndarray,
         ips_origen: Optional[List[str]] = None,
     ) -> Tuple[np.ndarray, float]:
+        t0 = time.perf_counter()
         matriz_X = np.asarray(matriz_X, dtype=np.float64)
         if matriz_X.ndim == 1:
             matriz_X = matriz_X.reshape(1, -1)
         if self._indices_caracteristicas is not None:
-            matriz_X = matriz_X[:, self._indices_caracteristicas]
+            if matriz_X.shape[1] == TOTAL_CANONICAS:
+                matriz_X = matriz_X[:, self._indices_caracteristicas]
+            elif matriz_X.shape[1] != self.total_caracteristicas_modelo:
+                raise ValueError(
+                    f"Dimensión inesperada ({matriz_X.shape[1]}): se esperaban {TOTAL_CANONICAS} canónicas o {self.total_caracteristicas_modelo} del modelo"
+                )
 
         # 1. Sanitización de entrada
         matriz_X = np.nan_to_num(matriz_X, nan=0.0, posinf=1e12, neginf=-1e12)
         matriz_X = np.clip(matriz_X, -1e12, 1e12)
-        matriz_cruda = matriz_X
 
-        # 2. Normalización (Escalador)
+        # 2. Normalización (Escalador) con acotamiento estricto [0.0, 1.0] para MinMaxScaler
         matriz_escalada = self._escalador.transform(matriz_X)
-        matriz_escalada = np.nan_to_num(matriz_escalada, nan=0.0, posinf=1e6, neginf=-1e6)
-        matriz_escalada = np.clip(matriz_escalada, -1e6, 1e6).astype(np.float32, copy=False)
+        if type(self._escalador).__name__ == "MinMaxScaler" or hasattr(self._escalador, "feature_range"):
+            matriz_escalada = np.nan_to_num(matriz_escalada, nan=0.0, posinf=1.0, neginf=0.0)
+            matriz_escalada = np.clip(matriz_escalada, 0.0, 1.0).astype(np.float32, copy=False)
+        else:
+            matriz_escalada = np.nan_to_num(matriz_escalada, nan=0.0, posinf=1e6, neginf=-1e6)
+            matriz_escalada = np.clip(matriz_escalada, -1e6, 1e6).astype(np.float32, copy=False)
 
-        # 3. Evaluación Conv1D
-        t0 = time.perf_counter()
+        # 3. Evaluación pura Conv1D (sin heurísticas ni reglas acopladas a puertos/IPs)
         tensor_3d = matriz_escalada.reshape(matriz_escalada.shape[0], matriz_escalada.shape[1], 1)
         if self._motor_ligero is not None:
             probabilidades = self._motor_ligero(tensor_3d)
@@ -454,61 +504,6 @@ class MotorInferencia:
 
         probabilidades = np.nan_to_num(probabilidades, nan=0.0, posinf=1.0, neginf=0.0)
         probabilidades = np.clip(probabilidades, 0.0, 1.0)
-
-        # 4. Heurística de refuerzo para ráfagas volumétricas (solo si iniciador es externo y no es respuesta web/multimedia efímera)
-        if matriz_cruda.shape[1] >= 18:
-            n_filas = matriz_cruda.shape[0]
-            puerto_orig = np.round(matriz_cruda[:, 0])
-            puerto_dest = np.round(matriz_cruda[:, 1])
-            paq_ida = matriz_cruda[:, 4]
-            paq_vuelta = matriz_cruda[:, 5]
-            tasa_paq_s = matriz_cruda[:, 17]
-            es_puerto_testbed = (puerto_orig == 9999.0) | (puerto_dest == 9999.0)
-
-            if ips_origen is not None and len(ips_origen) == n_filas:
-                es_iniciador_local = np.array(
-                    [str(ip).strip() in IPS_LOCALES_HOST for ip in ips_origen],
-                    dtype=bool,
-                )
-            else:
-                es_iniciador_local = np.zeros(n_filas, dtype=bool)
-
-            es_origen_web_multimedia = (
-                (puerto_orig == 53.0)
-                | (puerto_orig == 80.0)
-                | (puerto_orig == 443.0)
-                | (puerto_orig == 3478.0)
-                | (puerto_orig == 3479.0)
-                | ((puerto_orig >= 8801.0) & (puerto_orig <= 8810.0))
-                | ((puerto_orig >= 19300.0) & (puerto_orig <= 19309.0))
-            )
-            es_destino_efimero_local = (
-                (puerto_dest >= 1024.0)
-                & (puerto_dest != 8000.0)
-                & (puerto_dest != 8080.0)
-                & (puerto_dest != 8443.0)
-                & (puerto_dest != 9999.0)
-            )
-            es_respuesta_efimera_servicio = es_origen_web_multimedia & es_destino_efimero_local
-
-            mascara_inundacion = (
-                (
-                    (~es_iniciador_local)
-                    & (~es_respuesta_efimera_servicio)
-                    & (paq_ida >= 100.0)
-                    & (paq_vuelta <= 2.0)
-                    & (tasa_paq_s >= 45.0)
-                )
-                | (es_puerto_testbed & (paq_ida >= 55.0) & (paq_vuelta <= 2.0) & (tasa_paq_s >= 20.0))
-            )
-            if np.any(mascara_inundacion):
-                prob_volumetrica = np.clip(0.93 + 0.064 * np.minimum(tasa_paq_s / 500.0, 1.0), 0.93, 0.994)
-                probabilidades = np.where(mascara_inundacion, np.maximum(probabilidades, prob_volumetrica), probabilidades)
-
-            # Si src_ip == IP_LOCAL (sesión saliente iniciada por nuestra PC), nunca marcar como ataque DDoS
-            mascara_saliente_local = es_iniciador_local & (~es_puerto_testbed)
-            if np.any(mascara_saliente_local):
-                probabilidades = np.where(mascara_saliente_local, np.minimum(probabilidades, np.float32(0.05)), probabilidades)
 
         latencia_ms = (time.perf_counter() - t0) * 1000.0
         return probabilidades, latencia_ms

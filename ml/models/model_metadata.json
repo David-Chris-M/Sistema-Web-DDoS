@@ -1,11 +1,21 @@
 {
   "model_name": "Conv1D_DDoS_Classifier",
-  "trained_at": "2026-10-18T18:00:00Z",
+  "architecture": "Conv1D(32)->BN->MaxPool->Drop->Conv1D(64)->BN->MaxPool->Drop->Flatten->Dense(64)->Drop->Dense(1)",
+  "trained_at": "2026-11-20T08:54:17.501825Z",
   "dataset": "CICIDS2017 (Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv)",
-  "n_features": 80,
+  "split": {
+    "train": 0.7,
+    "val": 0.15,
+    "test": 0.15,
+    "stratified": true,
+    "random_state": 42,
+    "train_samples_pre_smote": 157997,
+    "train_samples_post_smote": 179234,
+    "val_samples": 33857,
+    "test_samples": 33857
+  },
+  "n_features": 77,
   "feature_names": [
-    "Source Port",
-    "Destination Port",
     "Protocol",
     "Flow Duration",
     "Total Fwd Packets",
@@ -61,7 +71,6 @@
     "Average Packet Size",
     "Avg Fwd Segment Size",
     "Avg Bwd Segment Size",
-    "Fwd Header Length.1",
     "Fwd Avg Bytes/Bulk",
     "Fwd Avg Packets/Bulk",
     "Fwd Avg Bulk Rate",
@@ -85,28 +94,55 @@
     "Idle Max",
     "Idle Min"
   ],
-  "scaler": "StandardScaler",
+  "dropped_features": [
+    "Flow ID",
+    "Source IP",
+    "Destination IP",
+    "Timestamp",
+    "Source Port",
+    "Destination Port",
+    "Fwd Header Length.1"
+  ],
+  "scaler": "MinMaxScaler(0, 1)",
+  "model_size_kb": 1046.24,
+  "decision_threshold": 0.5,
   "thesis_alignment": {
-    "pe1_smote": "SMOTE aplicado en balanceo de clases (train split)",
-    "pe2_conv1d": "Conv1D 2 capas convolucionales + MaxPooling + Dropout",
-    "pe3_fastapi": "FastAPI + WebSockets telemetria < 100 ms",
-    "pe4_hardware": "Ejecucion CPU liviana sin GPU de alta gama (< 500 MB RAM)"
+    "pe1_smote": "SMOTE(random_state=42) aplicado exclusivamente sobre Train (70%) tras partición 70/15/15 y MinMaxScaler [0,1]",
+    "pe2_conv1d": "Conv1D 2 capas convolucionales + BatchNorm + MaxPooling + Dropout + Flatten + Dense(64) sobre 77 features",
+    "pe3_fastapi": "MotorConv1DLigero CPU-Only: 0.634 ms/flujo (< 50 ms / < 100 ms)",
+    "pe4_hardware": "Modelo 1046.2 KB en ejecución CPU-Only sin GPU"
   },
   "smote": {
     "applied": true,
-    "random_state": 42
+    "random_state": 42,
+    "applied_only_to": "train"
   },
-  "decision_threshold": 0.5,
   "test_metrics": {
-    "accuracy": 0.9997,
-    "recall": 0.9997,
-    "precision": 0.9996,
-    "f1_score": 0.9996,
-    "fpr": 0.0004
+    "accuracy": 0.999557,
+    "precision": 0.999583,
+    "recall": 0.999635,
+    "f1_score": 0.999609,
+    "fpr": 0.000546,
+    "specificity": 0.999454,
+    "roc_auc": 0.999993,
+    "confusion_matrix": {
+      "TN": 14645,
+      "FP": 8,
+      "FN": 7,
+      "TP": 19197
+    },
+    "total_test_samples": 33857,
+    "epochs_trained": 15,
+    "train_duration_s": 172.3,
+    "max_engine_parity_diff": 1.01e-06
   },
   "latency": {
-    "avg_per_flow_ms": 0.0166,
-    "single_flow_cold_ms": 2.5,
-    "he2_limit_ms": 100.0
+    "avg_per_flow_ms": 0.0565,
+    "single_flow_cold_ms": 1.049,
+    "single_flow_warm_ms": 0.6342,
+    "p95_single_flow_ms": 0.8097,
+    "he2_limit_ms": 100.0,
+    "strict_limit_ms": 50.0,
+    "measured_engine": "MotorConv1DLigero"
   }
 }
