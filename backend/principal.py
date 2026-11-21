@@ -7,6 +7,7 @@ import hmac
 import io
 import ipaddress
 import logging
+import mimetypes
 import os
 import socket
 import threading
@@ -1388,7 +1389,7 @@ async def cabeceras_seguridad(peticion: Request, siguiente_llamada):
     metodo = peticion.method.upper()
 
     if metodo != "OPTIONS" and ruta_lower not in RUTAS_PUBLICAS_EXACTAS:
-        es_activo_login = ruta_lower.startswith(("/frontend/css/", "/frontend/img/"))
+        es_activo_login = ruta_lower.startswith(("/frontend/css/", "/frontend/img/", "/frontend/vendor/"))
         if not es_activo_login and not _es_peticion_autenticada(peticion):
             if ruta_lower.startswith("/frontend") or ruta_lower in ("/docs", "/redoc"):
                 return RedirectResponse(url="/frontend/login.html", status_code=302)
@@ -1507,6 +1508,9 @@ async def manejador_errores_no_controlados(peticion: Request, excepcion: Excepti
     registro_logger.exception("Excepción no controlada en ruta: %s", peticion.url.path)
     return JSONResponse(status_code=500, content={"detail": "Error interno del servidor"})
 
+
+mimetypes.add_type("font/woff2", ".woff2")
+mimetypes.add_type("font/woff", ".woff")
 
 if os.path.exists(configuracion.directorio_frontend):
     aplicacion.mount("/frontend", StaticFiles(directory=configuracion.directorio_frontend, html=True), name="frontend")

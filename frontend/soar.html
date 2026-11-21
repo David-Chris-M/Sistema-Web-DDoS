@@ -7,9 +7,8 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>CyberShield Pyme - Centro de Mitigación SOAR / IPS</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="/frontend/vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/frontend/vendor/bootstrap-icons/bootstrap-icons.min.css">
     <style>
         :root {
             --sidebar-width: 250px;
@@ -22,7 +21,7 @@
         }
 
         body {
-            font-family: 'Inter', sans-serif;
+            font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, 'Roboto', 'Helvetica Neue', Arial, sans-serif;
             background-color: var(--bg-light);
             color: #334155;
             overflow-x: hidden;
@@ -200,13 +199,13 @@
                 <a class="nav-link" href="/frontend/configuracion.html"><i class="bi bi-gear-fill"></i> Configuración</a>
             </li>
             <li class="nav-item">
-                <a class="nav-link" href="/docs" target="_blank"><i class="bi bi-code-slash"></i> API Swagger</a>
+                <a class="nav-link" href="/docs" target="_blank" rel="noopener noreferrer"><i class="bi bi-code-slash"></i> API Swagger</a>
             </li>
         </ul>
 
         <div class="mt-auto p-2 bg-dark bg-opacity-25 rounded small text-secondary">
             <div><i class="bi bi-shield-shaded text-info"></i> SOAR: 5 Pasos Activo</div>
-            <div><i class="bi bi-bricks text-warning"></i> IPS: 4 Candados NIST</div>
+            <div><i class="bi bi-database"></i> BD Local: SQLite3</div>
         </div>
     </div>
 
@@ -307,7 +306,7 @@
                             <small class="text-muted">Identifique y desbloquee por <strong>IP, Dirección MAC, Nombre de Equipo (Hostname), Fabricante o Regla</strong></small>
                         </div>
                         <div class="d-flex align-items-center gap-2">
-                            <a href="/api/soar/blocklist.txt" target="_blank" class="btn btn-sm btn-outline-dark py-0 px-2 small">
+                            <a href="/api/soar/blocklist.txt" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-dark py-0 px-2 small">
                                 <i class="bi bi-file-earmark-code me-1"></i>/api/soar/blocklist.txt
                             </a>
                             <span class="badge bg-danger-subtle text-danger fw-semibold" id="badgeTotalCuarentena">0 reglas activas</span>
@@ -380,7 +379,7 @@
                         <label class="form-label small fw-semibold mb-1">Dirección IP y Protocolo</label>
                         <div class="input-group input-group-sm">
                             <span class="input-group-text"><i class="bi bi-hdd-network"></i></span>
-                            <input type="text" class="form-control" id="inputIpManualBloquear" placeholder="Ej: 203.0.113.50 o 192.168.18.99">
+                            <input type="text" class="form-control" id="inputIpManualBloquear" placeholder="Ej: 203.0.113.50 o 192.168.1.99">
                             <select class="form-select" id="selectProtoManualBloquear" style="max-width: 86px;">
                                 <option value="TCP">TCP</option>
                                 <option value="UDP">UDP</option>
@@ -468,11 +467,11 @@
                             <i class="bi bi-link-45deg text-primary me-1"></i>URL en Vivo del Feed Perimetral (Texto Plano):
                         </label>
                         <div class="input-group input-group-sm">
-                            <input type="text" class="form-control font-monospace fw-bold" id="inputUrlBlocklistEdl" readonly value="http://127.0.0.1:8000/api/soar/blocklist.txt">
+                            <input type="text" class="form-control font-monospace fw-bold" id="inputUrlBlocklistEdl" readonly value="" placeholder="Calculando URL del Feed Perimetral...">
                             <button class="btn btn-primary fw-semibold" type="button" onclick="copiarUrlBlocklistEdl()">
                                 <i class="bi bi-clipboard me-1"></i> Copiar URL
                             </button>
-                            <a href="/api/soar/blocklist.txt" target="_blank" class="btn btn-outline-secondary fw-semibold">
+                            <a href="/api/soar/blocklist.txt" target="_blank" rel="noopener noreferrer" class="btn btn-outline-secondary fw-semibold">
                                 <i class="bi bi-box-arrow-up-right me-1"></i> Abrir Feed
                             </a>
                         </div>
@@ -483,7 +482,7 @@
                             <i class="bi bi-terminal-fill text-danger me-1"></i>1. Comando listo para Router MikroTik (RouterOS v6 / v7):
                         </div>
                         <pre class="p-2 rounded bg-dark text-light font-monospace mb-1" style="font-size: 0.76rem; white-space: pre-wrap;" id="preComandoMikrotik">/ip firewall filter add chain=forward src-address-list=CyberShield_Block action=drop comment="CyberShield SOAR IPS Perimetral" place-before=0
-/system scheduler add name="Sync_CyberShield_SOAR" interval=30s on-event="/tool fetch url=\"http://192.168.18.10:8000/api/soar/blocklist.txt\" dst-path=cybershield.txt; :foreach ip in=[:toarray [/file get cybershield.txt contents]] do={ /ip firewall address-list add list=CyberShield_Block address=\$ip timeout=15m }"</pre>
+/system scheduler add name="Sync_CyberShield_SOAR" interval=30s on-event="/tool fetch url=\"&lt;URL_FEED_EDL&gt;\" dst-path=cybershield.txt; :foreach ip in=[:toarray [/file get cybershield.txt contents]] do={ /ip firewall address-list add list=CyberShield_Block address=\$ip timeout=15m }"</pre>
                     </div>
 
                     <div class="row g-2">
@@ -516,8 +515,8 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/frontend/js/alarma_global.js?v=17"></script>
-    <script src="/frontend/js/soar.js?v=17"></script>
+    <script src="/frontend/vendor/bootstrap/bootstrap.bundle.min.js"></script>
+    <script src="/frontend/js/alarma_global.js?v=18"></script>
+    <script src="/frontend/js/soar.js?v=18"></script>
 </body>
 </html>

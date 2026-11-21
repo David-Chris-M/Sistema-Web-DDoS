@@ -32,12 +32,22 @@
             glowAlto: 'rgba(139, 92, 246, 0.85)',
             subtitulo: 'Ataque DDoS [ICMP] • Inundación de Diagnóstico / Ping Flood (Capa 3)',
             insigniaEstilo: 'background-color: rgba(124, 58, 237, 0.24); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.58);'
+        },
+        OTHER: {
+            codigo: 'OTHER',
+            colorHex: '#475569',
+            fondoGradiente: 'linear-gradient(135deg, #334155, #475569)',
+            sombraBanner: '0 10px 30px rgba(71, 85, 105, 0.55), 0 0 25px rgba(100, 116, 139, 0.75)',
+            glowBajo: 'rgba(100, 116, 139, 0.38)',
+            glowAlto: 'rgba(100, 116, 139, 0.80)',
+            subtitulo: 'Ataque DDoS [OTHER] • Anomalía Volumétrica en Otro Protocolo IP (Capa 3)',
+            insigniaEstilo: 'background-color: rgba(71, 85, 105, 0.24); color: #cbd5e1; border: 1px solid rgba(148, 163, 184, 0.55);'
         }
     };
 
     function obtenerTemaProtocoloAtaque(protocolo) {
         const clave = String(protocolo || 'TCP').trim().toUpperCase();
-        return MAPA_TEMAS_PROTOCOLO[clave] || MAPA_TEMAS_PROTOCOLO.TCP;
+        return MAPA_TEMAS_PROTOCOLO[clave] || MAPA_TEMAS_PROTOCOLO.OTHER;
     }
 
     if (!document.getElementById('estilos-centinela-emergencia')) {
@@ -300,11 +310,13 @@
     const DURACION_ALARMA_MS = 4800;
     const INTERVALO_CICLO_MS = 5000;
     const RETARDO_ENTRADA_VOZ_MS = 450;
+    const VELOCIDAD_VOZ_POR_DEFECTO = '0.95';
 
     let modoAlerta = localStorage.getItem(CLAVE_STORAGE_MODO) || 'intimidante';
     let contextoAudio = null;
     let temporizadorDestello = null;
     let temporizadorBanner = null;
+    let temporizadorOcultarBanner = null;
     let temporizadorVoz = null;
     let audioActivo = null;
     let urlAudioPrecargado = '';
@@ -314,24 +326,139 @@
     let ultimaEscrituraStorageMs = 0;
     let alertaVisualEstabaActiva = false;
     let ultimoRefrescoAlertasMs = 0;
+    let simulacionHabilitadaServidor = true;
+    let redirigiendoLogin = false;
+    let intervaloCentinelaVisual = null;
+    let socketCentinelaActivo = null;
+    let intentosReconexionCentinela = 0;
+    let temporizadorReconexionCentinela = null;
+    const callbacksLimpiezaSesion = [];
+
+    function esPerfilFemenino(perfil) {
+        const p = String(perfil || '').toLowerCase();
+        return p.includes('camila') || p.includes('dalia') || p.includes('elvira') ||
+               p.includes('salome') || p.includes('paloma') || p.startsWith('femenin');
+    }
+
+    function obtenerTonoPorDefecto(perfil) {
+        return esPerfilFemenino(perfil) ? '1.25' : '0.75';
+    }
+
+    function registrarLimpiezaSesion(callback) {
+        if (typeof callback === 'function') {
+            callbacksLimpiezaSesion.push(callback);
+        }
+    }
+
+    function limpiarAlmacenamientoSesion() {
+        try {
+            sessionStorage.clear();
+        } catch (_) {}
+        [
+            CLAVE_STORAGE_ALERTA,
+            CLAVE_STORAGE_ULTIMO_SONIDO,
+            'cybershield_soar_activo',
+            'cybershield_audio_frase'
+        ].forEach((clave) => {
+            try { localStorage.removeItem(clave); } catch (_) {}
+        });
+        cacheAlertaMemoria = null;
+    }
+
+    function detenerRecursosGlobalesSesion() {
+        if (intervaloCentinelaVisual) {
+            clearInterval(intervaloCentinelaVisual);
+            intervaloCentinelaVisual = null;
+        }
+        if (temporizadorReconexionCentinela) {
+            clearTimeout(temporizadorReconexionCentinela);
+            temporizadorReconexionCentinela = null;
+        }
+        if (temporizadorVoz) {
+            clearTimeout(temporizadorVoz);
+            temporizadorVoz = null;
+        }
+        if (temporizadorDestello) {
+            clearTimeout(temporizadorDestello);
+            temporizadorDestello = null;
+        }
+        if (temporizadorBanner) {
+            clearTimeout(temporizadorBanner);
+            temporizadorBanner = null;
+        }
+        if (temporizadorOcultarBanner) {
+            clearTimeout(temporizadorOcultarBanner);
+            temporizadorOcultarBanner = null;
+        }
+        limpiarAudioActivo();
+        if (socketCentinelaActivo) {
+            try {
+                socketCentinelaActivo.onclose = null;
+                socketCentinelaActivo.close(1000, 'Session ended');
+            } catch (_) {}
+            socketCentinelaActivo = null;
+        }
+        while (callbacksLimpiezaSesion.length > 0) {
+            const fn = callbacksLimpiezaSesion.pop();
+            try { fn(); } catch (_) {}
+        }
+    }
+
+    function manejarSesionExpirada() {
+        if (redirigiendoLogin) return;
+        redirigiendoLogin = true;
+        detenerRecursosGlobalesSesion();
+        limpiarAlmacenamientoSesion();
+        window.location.replace('/frontend/login.html');
+    }
+
+    function verificarRespuestaApi(respuesta) {
+        if (respuesta && respuesta.status === 401) {
+            manejarSesionExpirada();
+            return false;
+        }
+        return Boolean(respuesta && respuesta.ok);
+    }
+
+    function cambiarModoAlertaGlobal(modo) {
+        const modoValido = ['intimidante', 'radar', 'silencio'].includes(modo) ? modo : 'intimidante';
+        modoAlerta = modoValido;
+        try {
+            localStorage.setItem(CLAVE_STORAGE_MODO, modoValido);
+        } catch (_) {}
+
+        if (modoValido !== 'intimidante') {
+            if (temporizadorVoz) {
+                clearTimeout(temporizadorVoz);
+                temporizadorVoz = null;
+            }
+            limpiarAudioActivo();
+            if ('speechSynthesis' in window) {
+                try { window.speechSynthesis.cancel(); } catch (_) {}
+            }
+        } else {
+            precargarAudioVozActual();
+        }
+        return modoValido;
+    }
 
     function formatearFraseConProtocolo(fraseBase, protocolo) {
         const texto = (fraseBase || 'Peligro. El sistema está sufriendo un ataque.').trim();
         const proto = String(protocolo || '').trim().toUpperCase();
-        if (!proto || !['TCP', 'UDP', 'ICMP'].includes(proto)) {
-            return texto.replace(/\{PROTO(?:COLO)?\}/gi, 'TCP');
-        }
+        const etiquetaProto = ['TCP', 'UDP', 'ICMP'].includes(proto)
+            ? proto
+            : (proto === 'OTHER' ? 'otro protocolo IP' : 'TCP');
         if (/\{PROTO(?:COLO)?\}/i.test(texto)) {
-            return texto.replace(/\{PROTO(?:COLO)?\}/gi, proto);
+            return texto.replace(/\{PROTO(?:COLO)?\}/gi, etiquetaProto);
         }
         const textoLower = texto.toLowerCase();
-        if (textoLower.includes('tcp') || textoLower.includes('udp') || textoLower.includes('icmp')) {
+        if (textoLower.includes('tcp') || textoLower.includes('udp') || textoLower.includes('icmp') || textoLower.includes('otro protocolo')) {
             return texto;
         }
         if (texto.endsWith('.')) {
-            return `${texto.slice(0, -1)} DDoS por protocolo ${proto}.`;
+            return `${texto.slice(0, -1)} DDoS por protocolo ${etiquetaProto}.`;
         }
-        return `${texto} DDoS por protocolo ${proto}.`;
+        return `${texto} DDoS por protocolo ${etiquetaProto}.`;
     }
 
     function construirUrlVozActual(protocoloAtaque = null) {
@@ -342,13 +469,16 @@
             fraseGuardada || 'Peligro. El sistema está sufriendo un ataque.',
             protoEfectivo
         );
-        const tono = localStorage.getItem(CLAVE_STORAGE_TONO) || '1.00';
-        const velocidad = localStorage.getItem(CLAVE_STORAGE_VELOCIDAD) || '1.00';
+        const tono = localStorage.getItem(CLAVE_STORAGE_TONO) || obtenerTonoPorDefecto(perfil);
+        const velocidad = localStorage.getItem(CLAVE_STORAGE_VELOCIDAD) || VELOCIDAD_VOZ_POR_DEFECTO;
         return `/api/tts/audio?voice=${encodeURIComponent(perfil)}&text=${encodeURIComponent(fraseFinal)}&pitch=${encodeURIComponent(tono)}&rate=${encodeURIComponent(velocidad)}`;
     }
 
     function precargarAudioVozActual() {
         try {
+            modoAlerta = localStorage.getItem(CLAVE_STORAGE_MODO) || 'intimidante';
+            if (modoAlerta !== 'intimidante') return;
+
             ['TCP', 'UDP', 'ICMP'].forEach(proto => {
                 const url = construirUrlVozActual(proto);
                 if (cacheAudiosProtocolo[proto] && cacheAudiosProtocolo[proto].url === url) return;
@@ -489,6 +619,10 @@
 
         const bannerHabilitado = localStorage.getItem(CLAVE_STORAGE_BANNER) !== 'false';
         if (bannerHabilitado) {
+            if (temporizadorOcultarBanner) {
+                clearTimeout(temporizadorOcultarBanner);
+                temporizadorOcultarBanner = null;
+            }
             let banner = document.getElementById('banner-alerta-centinela-global');
             if (!banner) {
                 banner = document.createElement('div');
@@ -497,7 +631,11 @@
                 banner.onclick = () => {
                     banner.style.opacity = '0';
                     banner.style.transform = 'translateX(-50%) translateY(-25px)';
-                    setTimeout(() => banner.remove(), 400);
+                    if (temporizadorOcultarBanner) clearTimeout(temporizadorOcultarBanner);
+                    temporizadorOcultarBanner = setTimeout(() => {
+                        temporizadorOcultarBanner = null;
+                        if (banner && banner.parentNode) banner.remove();
+                    }, 400);
                 };
                 document.body.appendChild(banner);
             }
@@ -538,10 +676,15 @@
 
             if (temporizadorBanner) clearTimeout(temporizadorBanner);
             temporizadorBanner = setTimeout(() => {
+                temporizadorBanner = null;
                 if (!hayAlertaActiva() && banner && banner.parentNode) {
                     banner.style.opacity = '0';
                     banner.style.transform = 'translateX(-50%) translateY(-25px)';
-                    setTimeout(() => banner.remove(), 400);
+                    if (temporizadorOcultarBanner) clearTimeout(temporizadorOcultarBanner);
+                    temporizadorOcultarBanner = setTimeout(() => {
+                        temporizadorOcultarBanner = null;
+                        if (!hayAlertaActiva() && banner && banner.parentNode) banner.remove();
+                    }, 400);
                 }
             }, 5500);
         }
@@ -550,11 +693,19 @@
     function desactivarAlertasVisuales() {
         alertaVisualEstabaActiva = false;
         document.body.classList.remove('alerta-perimetral-activa');
+        if (temporizadorBanner) {
+            clearTimeout(temporizadorBanner);
+            temporizadorBanner = null;
+        }
         const banner = document.getElementById('banner-alerta-centinela-global');
         if (banner) {
             banner.style.opacity = '0';
             banner.style.transform = 'translateX(-50%) translateY(-25px)';
-            setTimeout(() => banner.remove(), 400);
+            if (temporizadorOcultarBanner) clearTimeout(temporizadorOcultarBanner);
+            temporizadorOcultarBanner = setTimeout(() => {
+                temporizadorOcultarBanner = null;
+                if (!hayAlertaActiva() && banner && banner.parentNode) banner.remove();
+            }, 400);
         }
     }
 
@@ -636,6 +787,7 @@
                 } else {
                     temporizadorVoz = setTimeout(() => {
                         temporizadorVoz = null;
+                        if ((localStorage.getItem(CLAVE_STORAGE_MODO) || 'intimidante') !== 'intimidante') return;
                         emitirVozEspanol(0, protocoloEfectivo);
                     }, RETARDO_ENTRADA_VOZ_MS);
                 }
@@ -718,13 +870,14 @@
         reproducirAlarmaGlobal(alerta.motivo, false, protocoloNormalizado);
     }
 
-    // 7. Sincronización Acústica entre Ventanas
+    // 7. Sincronización Acústica entre Ventanas (P3-03: no emitir voz en modo 'radar' o 'silencio')
     function sincronizarAlarmaAlCargarVentana() {
         const alerta = obtenerAlertaActiva();
         if (!alerta) return;
 
         const ahora = Date.now();
-        activarAlertasVisuales(alerta.motivo, alerta.protocolo || 'TCP');
+        const protoAlerta = alerta.protocolo || 'TCP';
+        activarAlertasVisuales(alerta.motivo, protoAlerta);
 
         modoAlerta = localStorage.getItem(CLAVE_STORAGE_MODO) || 'intimidante';
         if (modoAlerta === 'silencio') return;
@@ -733,19 +886,21 @@
         const tiempoDesdeUltimoSonido = ahora - ultimoSonido;
 
         if (tiempoDesdeUltimoSonido < INTERVALO_CICLO_MS) {
+            if (modoAlerta !== 'intimidante') return;
             if (tiempoDesdeUltimoSonido < RETARDO_ENTRADA_VOZ_MS) {
                 const retardo = Math.max(40, RETARDO_ENTRADA_VOZ_MS - tiempoDesdeUltimoSonido);
                 if (temporizadorVoz) clearTimeout(temporizadorVoz);
                 temporizadorVoz = setTimeout(() => {
                     temporizadorVoz = null;
-                    emitirVozEspanol(0);
+                    if ((localStorage.getItem(CLAVE_STORAGE_MODO) || 'intimidante') !== 'intimidante') return;
+                    emitirVozEspanol(0, protoAlerta);
                 }, retardo);
             } else if (tiempoDesdeUltimoSonido >= RETARDO_ENTRADA_VOZ_MS && tiempoDesdeUltimoSonido < 4000) {
                 const vozOffset = (tiempoDesdeUltimoSonido - RETARDO_ENTRADA_VOZ_MS) / 1000.0;
-                emitirVozEspanol(vozOffset);
+                emitirVozEspanol(vozOffset, protoAlerta);
             }
         } else {
-            reproducirAlarmaGlobal(alerta.motivo, false, alerta.protocolo || 'TCP');
+            reproducirAlarmaGlobal(alerta.motivo, false, protoAlerta);
         }
     }
 
@@ -764,7 +919,17 @@
                 }
             } catch (_) {}
         }
-        precargarAudioVozActual();
+        const clavesVoz = [
+            CLAVE_STORAGE_MODO,
+            CLAVE_STORAGE_PERFIL_VOZ,
+            CLAVE_STORAGE_TONO,
+            CLAVE_STORAGE_VELOCIDAD,
+            CLAVE_STORAGE_FRASE_TEXTO
+        ];
+        if (!evento.key || clavesVoz.includes(evento.key)) {
+            modoAlerta = localStorage.getItem(CLAVE_STORAGE_MODO) || 'intimidante';
+            precargarAudioVozActual();
+        }
         aplicarPreferenciasInterfaz();
     });
 
@@ -772,7 +937,7 @@
     sincronizarAlarmaAlCargarVentana();
 
     // 8. Centinela Periódico de Estado Visual
-    setInterval(() => {
+    intervaloCentinelaVisual = setInterval(() => {
         const alerta = obtenerAlertaActiva();
         if (alerta) {
             activarAlertasVisuales(alerta.motivo, alerta.protocolo || 'TCP');
@@ -783,11 +948,8 @@
     }, 200);
 
     // 9. Conexión WebSocket Centinela en Pantallas Secundarias
-    let socketCentinelaActivo = null;
-    let intentosReconexionCentinela = 0;
-    let temporizadorReconexionCentinela = null;
-
     function iniciarWebSocketCentinelaSiNoExiste() {
+        if (redirigiendoLogin) return;
         const rutaActual = window.location.pathname;
         const esMonitorPrincipal = rutaActual === '/' || rutaActual === '/frontend' || rutaActual.endsWith('/frontend/') || rutaActual.endsWith('/frontend/index.html');
         if (esMonitorPrincipal) return;
@@ -820,19 +982,23 @@
                     if (datos.ddos > 0) {
                         esAtaqueDetectado = true;
                         const flujoAtaque = Array.isArray(datos.flows) ? datos.flows.find(f => f && f.is_attack) : null;
-                        protocoloDetectado = datos.attack_protocol || (flujoAtaque && flujoAtaque.protocol) || 'TCP';
+                        protocoloDetectado = datos.attack_protocol || (flujoAtaque && flujoAtaque.protocol) || 'OTHER';
                         mensaje = `Peligro. El sistema está sufriendo un ataque [${protocoloDetectado}] (${datos.ddos} flujos DDoS detectados)`;
                     }
                 } else if (datos.is_attack) {
                     esAtaqueDetectado = true;
-                    protocoloDetectado = datos.protocol || 'TCP';
+                    protocoloDetectado = datos.protocol || 'OTHER';
                     mensaje = `Peligro. El sistema está sufriendo un ataque [${protocoloDetectado}]`;
                 }
 
                 if (esAtaqueDetectado) {
                     registrarAtaqueGlobal(mensaje, protocoloDetectado);
                     const ahora = Date.now();
-                    if (typeof window.cargarAlertas === 'function' && ahora - ultimoRefrescoAlertasMs > 1200) {
+                    const paginaActualAlertas = typeof window.obtenerPaginaActualAlertas === 'function'
+                        ? window.obtenerPaginaActualAlertas()
+                        : 1;
+                    // Solo auto-refrescar la tabla en vivo si el operador está en la página 1 (P3-09)
+                    if (typeof window.cargarAlertas === 'function' && paginaActualAlertas === 1 && ahora - ultimoRefrescoAlertasMs > 1200) {
                         ultimoRefrescoAlertasMs = ahora;
                         try { window.cargarAlertas(1); } catch (_) {}
                     }
@@ -844,9 +1010,13 @@
             try { socket.close(); } catch (_) {}
         };
 
-        socket.onclose = () => {
+        socket.onclose = (evento) => {
             if (socketCentinelaActivo === socket) {
                 socketCentinelaActivo = null;
+            }
+            if (redirigiendoLogin || (evento && evento.code === 1008)) {
+                manejarSesionExpirada();
+                return;
             }
             const baseMs = Math.min(15000, 800 * Math.pow(2, intentosReconexionCentinela));
             const jitterMs = Math.floor(Math.random() * 400);
@@ -856,20 +1026,22 @@
     }
     iniciarWebSocketCentinelaSiNoExiste();
 
-    // 10. Preferencias de Interfaz
+    // 10. Preferencias de Interfaz y Permisos de Simulación
     function aplicarPreferenciasInterfaz() {
         const temaVisual = localStorage.getItem('cybershield_tema_visual') || 'claro';
         document.documentElement.classList.remove('tema-gris', 'tema-oscuro');
-        document.body.classList.remove('tema-gris', 'tema-oscuro');
+        if (document.body) document.body.classList.remove('tema-gris', 'tema-oscuro');
         if (temaVisual === 'gris') {
             document.documentElement.classList.add('tema-gris');
-            document.body.classList.add('tema-gris');
+            if (document.body) document.body.classList.add('tema-gris');
         } else if (temaVisual === 'oscuro') {
             document.documentElement.classList.add('tema-oscuro');
-            document.body.classList.add('tema-oscuro');
+            if (document.body) document.body.classList.add('tema-oscuro');
         }
 
-        const mostrarConsola = localStorage.getItem('cybershield_mostrar_consola') !== 'false';
+        const mostrarConsolaPref = localStorage.getItem('cybershield_mostrar_consola') !== 'false';
+        const mostrarConsola = simulacionHabilitadaServidor && mostrarConsolaPref;
+
         const botonConsola = document.getElementById('btnConsolaSimulacion') || document.querySelector('[data-bs-target="#panelSimulacion"]');
         if (botonConsola) {
             if (!mostrarConsola) {
@@ -889,6 +1061,30 @@
             } else {
                 panelSimulacion.classList.remove('d-none');
                 panelSimulacion.style.removeProperty('display');
+            }
+        }
+
+        const btnSimularAlerta = document.getElementById('btnSimularAlerta');
+        if (btnSimularAlerta) {
+            if (!simulacionHabilitadaServidor) {
+                btnSimularAlerta.classList.add('d-none');
+                btnSimularAlerta.disabled = true;
+            } else {
+                btnSimularAlerta.classList.remove('d-none');
+                btnSimularAlerta.disabled = false;
+            }
+        }
+
+        const switchMostrarConsola = document.getElementById('switchMostrarConsola');
+        const notaSimServidor = document.getElementById('notaSimulacionServidor');
+        if (switchMostrarConsola) {
+            if (!simulacionHabilitadaServidor) {
+                switchMostrarConsola.checked = false;
+                switchMostrarConsola.disabled = true;
+                if (notaSimServidor) notaSimServidor.classList.remove('d-none');
+            } else {
+                switchMostrarConsola.disabled = false;
+                if (notaSimServidor) notaSimServidor.classList.add('d-none');
             }
         }
 
@@ -953,24 +1149,40 @@
             liLogout.id = 'navItemCerrarSesion';
             const enlaceLogout = document.createElement('a');
             enlaceLogout.className = 'nav-link text-danger';
-            enlaceLogout.href = '/api/auth/logout';
+            enlaceLogout.href = '#cerrar-sesion';
+            enlaceLogout.setAttribute('role', 'button');
             enlaceLogout.innerHTML = '<i class="bi bi-box-arrow-left"></i> Cerrar Sesión';
             enlaceLogout.addEventListener('click', async (e) => {
                 e.preventDefault();
+                redirigiendoLogin = true;
+                detenerRecursosGlobalesSesion();
                 try {
                     await fetch('/api/auth/logout', { method: 'POST' });
                 } catch (_) {}
-                window.location.href = '/frontend/login.html';
+                limpiarAlmacenamientoSesion();
+                window.location.replace('/frontend/login.html');
             });
             liLogout.appendChild(enlaceLogout);
             listaNav.appendChild(liLogout);
         }
     }
 
+    async function sincronizarEstadoSesionYPermisos() {
+        try {
+            const resp = await fetch('/api/auth/me');
+            if (!verificarRespuestaApi(resp)) return;
+            const datos = await resp.json();
+            if (datos && typeof datos.simulation_enabled === 'boolean') {
+                simulacionHabilitadaServidor = datos.simulation_enabled;
+                aplicarPreferenciasInterfaz();
+            }
+        } catch (_) {}
+    }
+
     async function sincronizarEstadoModuloSoar() {
         try {
             const resp = await fetch('/api/soar/status');
-            if (!resp.ok) return;
+            if (!verificarRespuestaApi(resp)) return;
             const datos = await resp.json();
             const estadoReal = datos && datos.enabled === true ? 'true' : 'false';
             if (localStorage.getItem('cybershield_soar_activo') !== estadoReal) {
@@ -983,10 +1195,12 @@
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => {
             aplicarPreferenciasInterfaz();
+            sincronizarEstadoSesionYPermisos();
             sincronizarEstadoModuloSoar();
         });
     } else {
         aplicarPreferenciasInterfaz();
+        sincronizarEstadoSesionYPermisos();
         sincronizarEstadoModuloSoar();
     }
 
@@ -1014,6 +1228,21 @@
     window.aplicarPreferenciasInterfaz = aplicarPreferenciasInterfaz;
     window.obtenerTemaProtocoloAtaque = obtenerTemaProtocoloAtaque;
     window.precargarAudioVozActual = precargarAudioVozActual;
+    window.cambiarModoAlertaGlobal = cambiarModoAlertaGlobal;
+    window.manejarSesionExpirada = manejarSesionExpirada;
+    window.verificarRespuestaApi = verificarRespuestaApi;
+    window.registrarLimpiezaSesion = registrarLimpiezaSesion;
+    window.limpiarAlmacenamientoSesion = limpiarAlmacenamientoSesion;
+    window.esSimulacionHabilitada = () => simulacionHabilitadaServidor;
+    window.notificarSimulacionDeshabilitada = () => {
+        simulacionHabilitadaServidor = false;
+        aplicarPreferenciasInterfaz();
+    };
+    window.VOZ_DEFAULTS_CYBERSHIELD = {
+        esPerfilFemenino,
+        obtenerTonoPorDefecto,
+        VELOCIDAD_POR_DEFECTO: VELOCIDAD_VOZ_POR_DEFECTO
+    };
 
 })();
 

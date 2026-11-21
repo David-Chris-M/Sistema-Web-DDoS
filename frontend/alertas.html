@@ -7,9 +7,8 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>CyberShield Pyme - Gestión de Alertas</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="/frontend/vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/frontend/vendor/bootstrap-icons/bootstrap-icons.min.css">
     <style>
         :root {
             --sidebar-width: 250px;
@@ -20,7 +19,7 @@
             --danger: #ef4444;
             --bg-light: #f8fafc;
         }
-        body { font-family: 'Inter', sans-serif; background-color: var(--bg-light); overflow-x: hidden; }
+        body { font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, 'Roboto', 'Helvetica Neue', Arial, sans-serif; background-color: var(--bg-light); overflow-x: hidden; }
         .sidebar {
             position: fixed; top: 0; left: 0; width: var(--sidebar-width); height: 100vh;
             background-color: var(--primary); color: white; padding: 1.25rem 1rem; z-index: 1000;
@@ -106,11 +105,11 @@
             <li class="nav-item"><a class="nav-link" href="/frontend/rendimiento.html"><i class="bi bi-cpu"></i> Rendimiento</a></li>
             <li class="nav-item"><a class="nav-link active" href="/frontend/alertas.html"><i class="bi bi-exclamation-triangle"></i> Alertas</a></li>
             <li class="nav-item"><a class="nav-link" href="/frontend/configuracion.html"><i class="bi bi-gear"></i> Configuración</a></li>
-            <li class="nav-item"><a class="nav-link" href="/docs" target="_blank"><i class="bi bi-code-slash"></i> API Swagger</a></li>
+            <li class="nav-item"><a class="nav-link" href="/docs" target="_blank" rel="noopener noreferrer"><i class="bi bi-code-slash"></i> API Swagger</a></li>
         </ul>
         <div class="mt-auto p-2 bg-dark bg-opacity-25 rounded small text-secondary">
             <div><i class="bi bi-cpu"></i> NIDS: Conv1D (Capas 3 y 4)</div>
-            <div><i class="bi bi-database"></i> SQLite / PostgreSQL</div>
+            <div><i class="bi bi-database"></i> BD Local: SQLite3</div>
         </div>
     </div>
 
@@ -123,9 +122,11 @@
                 <span class="text-muted small" id="currentTime"></span>
             </div>
             <div class="d-flex gap-2">
-                <button class="btn btn-sm btn-outline-danger" onclick="simularAlerta()"><i class="bi bi-play-circle"></i> Inyectar Ataque Test</button>
+                <button id="btnSimularAlerta" class="btn btn-sm btn-outline-danger" onclick="simularAlerta()"><i class="bi bi-play-circle"></i> Inyectar Ataque Test</button>
             </div>
         </div>
+
+        <div id="alertaSimulacionAviso" class="alert alert-warning py-2 px-3 small d-none mb-3" role="alert"></div>
 
         <!-- KPIs de Alertas -->
         <div class="row g-3 mb-4">
@@ -169,7 +170,7 @@
                 <div class="kpi-card">
                     <div class="d-flex justify-content-between align-items-start">
                         <div>
-                            <div class="kpi-label">Medias (< 85%)</div>
+                            <div class="kpi-label">Medias (&lt; 85%)</div>
                             <div class="kpi-value text-info" id="kpiMedium">0</div>
                         </div>
                         <i class="bi bi-info-circle fs-3 text-info"></i>
@@ -198,7 +199,7 @@
                             <option value="all">Todas</option>
                             <option value="Crítica">Crítica (≥ 95%)</option>
                             <option value="Alta">Alta (85% - 94%)</option>
-                            <option value="Media">Media (< 85%)</option>
+                            <option value="Media">Media (&lt; 85%)</option>
                         </select>
                     </div>
                     <div class="col-md-2">
@@ -208,6 +209,7 @@
                             <option value="UDP">UDP</option>
                             <option value="TCP">TCP</option>
                             <option value="ICMP">ICMP</option>
+                            <option value="OTHER">OTHER</option>
                         </select>
                     </div>
                     <div class="col-md-3">
@@ -275,8 +277,8 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/frontend/js/alarma_global.js?v=14"></script>
-    <script src="/frontend/js/alertas.js?v=12"></script>
+    <script src="/frontend/vendor/bootstrap/bootstrap.bundle.min.js"></script>
+    <script src="/frontend/js/alarma_global.js?v=18"></script>
+    <script src="/frontend/js/alertas.js?v=18"></script>
 </body>
 </html>

@@ -20,6 +20,12 @@
 
     let cuarentenaLocal = [];
     let eventosLocal = [];
+    let dashboardEnVuelo = false;
+    let refrescoPendiente = false;
+    let ultimoRefrescoExpiracionMs = 0;
+    let temporizadorToastSoar = null;
+    const COOLDOWN_EXPIRACION_MS = 3000;
+    const duracionSeleccionadaPorIp = new Map();
 
     function escaparHtml(texto) {
         return String(texto == null ? '' : texto)
@@ -28,6 +34,18 @@
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#39;');
+    }
+
+    function verificarSesion401(resp) {
+        if (resp && resp.status === 401) {
+            if (typeof window.manejarSesionExpirada === 'function') {
+                window.manejarSesionExpirada();
+            } else {
+                window.location.replace('/frontend/login.html');
+            }
+            return true;
+        }
+        return false;
     }
 
     function formatearSegundosMmSs(segundos) {
@@ -62,29 +80,52 @@
             `;
             document.body.appendChild(toast);
         }
-        const icono = esError
-            ? '<i class="bi bi-shield-fill-exclamation text-warning fs-5"></i>'
-            : '<i class="bi bi-check-circle-fill text-success fs-5"></i>';
-        toast.innerHTML = `${icono} <span>${escaparHtml(mensaje)}</span>`;
+        toast.textContent = '';
+        const icono = document.createElement('i');
+        icono.className = esError
+            ? 'bi bi-shield-fill-exclamation text-warning fs-5'
+            : 'bi bi-check-circle-fill text-success fs-5';
+        const spanTxt = document.createElement('span');
+        spanTxt.textContent = String(mensaje ?? '');
+        toast.append(icono, spanTxt);
         toast.style.opacity = '1';
-        setTimeout(() => {
+
+        if (temporizadorToastSoar) clearTimeout(temporizadorToastSoar);
+        temporizadorToastSoar = setTimeout(() => {
             if (toast) toast.style.opacity = '0';
+            temporizadorToastSoar = null;
         }, 3500);
     }
 
+    // Construcción dinámica de URL EDL respetando protocolo y puerto reales + primary_local_ip en loopback (P3-10)
+    function construirUrlEdlDinamica(ipServidor) {
+        const protocolo = window.location.protocol || 'http:';
+        const hostnameActual = (window.location.hostname || '').trim();
+        const puertoActual = window.location.port ? `:${window.location.port}` : '';
+        const esLoopbackLocal = !hostnameActual ||
+            hostnameActual === 'localhost' ||
+            hostnameActual === '127.0.0.1' ||
+            hostnameActual === '::1' ||
+            hostnameActual === '[::1]';
+        const ipLocalReal = (ipServidor && String(ipServidor).trim()) ? String(ipServidor).trim() : '';
+        const hostObjetivo = (esLoopbackLocal && ipLocalReal) ? ipLocalReal : (hostnameActual || '127.0.0.1');
+        const hostFormateado = hostObjetivo.includes(':') && !hostObjetivo.startsWith('[')
+            ? `[${hostObjetivo}]`
+            : hostObjetivo;
+        return `${protocolo}//${hostFormateado}${puertoActual}/api/soar/blocklist.txt`;
+    }
+
     function actualizarUrlEdlModal(ipServidor) {
-        const hostBase = window.location.host || `${ipServidor || '192.168.18.10'}:8000`;
-        const urlCompleta = `${window.location.protocol}//${hostBase}/api/soar/blocklist.txt`;
-        const urlLan = `http://${ipServidor || '192.168.18.10'}:8000/api/soar/blocklist.txt`;
+        const urlEdl = construirUrlEdlDinamica(ipServidor);
 
         const inputUrl = document.getElementById('inputUrlBlocklistEdl');
-        if (inputUrl) inputUrl.value = urlLan;
+        if (inputUrl) inputUrl.value = urlEdl;
 
         const preMikrotik = document.getElementById('preComandoMikrotik');
         if (preMikrotik) {
             preMikrotik.textContent =
                 `/ip firewall filter add chain=forward src-address-list=CyberShield_Block action=drop comment="CyberShield SOAR IPS Perimetral" place-before=0\n` +
-                `/system scheduler add name="Sync_CyberShield_SOAR" interval=30s on-event="/tool fetch url=\\"${urlLan}\\" dst-path=cybershield.txt; :foreach ip in=[:toarray [/file get cybershield.txt contents]] do={ /ip firewall address-list add list=CyberShield_Block address=\\$ip timeout=15m }"`;
+                `/system scheduler add name="Sync_CyberShield_SOAR" interval=30s on-event="/tool fetch url=\\"${urlEdl}\\" dst-path=cybershield.txt; :foreach ip in=[:toarray [/file get cybershield.txt contents]] do={ /ip firewall address-list add list=CyberShield_Block address=\\$ip timeout=15m }"`;
         }
     }
 
@@ -210,7 +251,7 @@
                        <i class="bi bi-infinity me-1"></i>Permanente (Manual)
                    </span>`
                 : `<span class="countdown-pill" data-ip-countdown="${ip}">
-                       <i class="bi bi-clock-history me-1"></i>15m (${formatearSegundosMmSs(item.remaining_seconds)})
+                       <i class="bi bi-clock-history me-1"></i>15m (${formatearSegundosMmSs(item.remaining_seconds ?? 0)})
                    </span>`;
 
             return `
@@ -234,7 +275,7 @@
                     <td><span class="badge bg-dark-subtle text-dark font-monospace">${regla}</span></td>
                     <td>${htmlExpiracion}</td>
                     <td class="text-end">
-                        <button class="btn btn-sm btn-outline-success rounded-pill px-3 fw-semibold" onclick="desbloquearIpAccion('${ip}')">
+                        <button type="button" class="btn btn-sm btn-outline-success rounded-pill px-3 fw-semibold" data-action="unblock" data-ip="${ip}">
                             <i class="bi bi-unlock-fill me-1"></i> Desbloquear IP
                         </button>
                     </td>
@@ -311,9 +352,12 @@
         }
 
         contenedorFlujoCincoPasos.innerHTML = eventosFiltrados.map((ev, idx) => {
-            const ip = escaparHtml(ev.src_ip);
-            const proto = escaparHtml(ev.protocol || 'TCP');
-            const conf = Number(ev.confidence_percentage || 99).toFixed(1);
+            const ipRaw = String(ev.src_ip || '');
+            const ip = escaparHtml(ipRaw);
+            const proto = escaparHtml(ev.protocol || 'OTHER');
+            const conf = (ev.confidence_percentage !== null && ev.confidence_percentage !== undefined && Number.isFinite(Number(ev.confidence_percentage)))
+                ? `${Number(ev.confidence_percentage).toFixed(1)}%`
+                : 'N/D';
             const bloqueada = Boolean(ev.is_blocked);
             const esPerm = Boolean(ev.is_permanent);
             const s = ev.steps || {};
@@ -323,27 +367,28 @@
             const p4 = s.step4_sans || {};
             const p5 = s.step5_firewall || {};
             const idSelectTarjeta = `selDurCard_${idx}`;
+            const durGuardada = duracionSeleccionadaPorIp.get(ipRaw) || 'permanent';
             const macEvento = (p2.applicable && p2.mac && p2.mac !== 'N/A (Tráfico WAN)')
                 ? `<span class="badge bg-secondary-subtle text-dark font-monospace border" title="Dirección MAC Física del Atacante LAN"><i class="bi bi-hdd-network me-1"></i>MAC: ${escaparHtml(p2.mac)}</span>`
                 : '';
 
             const btnAccion = bloqueada
-                ? `<button class="btn btn-sm btn-success rounded-pill px-3 fw-semibold" onclick="desbloquearIpAccion('${ip}')">
+                ? `<button type="button" class="btn btn-sm btn-success rounded-pill px-3 fw-semibold" data-action="unblock" data-ip="${ip}">
                        <i class="bi bi-unlock-fill me-1"></i> Desbloquear IP
                    </button>`
-                : `<div class="d-flex align-items-center gap-1">
-                       <select class="form-select form-select-sm rounded-pill" id="${idSelectTarjeta}" style="width: auto; font-size: 0.76rem;">
-                           <option value="permanent" selected>Permanente</option>
-                           <option value="15m">15 min</option>
+                : `<div class="d-flex align-items-center gap-1 soar-card-actions">
+                       <select class="form-select form-select-sm rounded-pill sel-duracion-tarjeta" id="${idSelectTarjeta}" data-ip="${ip}" style="width: auto; font-size: 0.76rem;">
+                           <option value="permanent" ${durGuardada === 'permanent' ? 'selected' : ''}>Permanente</option>
+                           <option value="15m" ${durGuardada === '15m' ? 'selected' : ''}>15 min</option>
                        </select>
-                       <button class="btn btn-sm btn-danger rounded-pill px-3 fw-semibold" onclick="bloquearIpDesdeTarjeta('${ip}', '${proto}', '${idSelectTarjeta}')">
+                       <button type="button" class="btn btn-sm btn-danger rounded-pill px-3 fw-semibold" data-action="block" data-ip="${ip}" data-proto="${proto}" data-select-id="${idSelectTarjeta}">
                            <i class="bi bi-shield-fill-x me-1"></i> Aislar IP
                        </button>
                    </div>`;
 
             const textoEstadoBloqueo = esPerm
                 ? 'BLOQUEADA (PERMANENTE)'
-                : `BLOQUEADA (15m: ${formatearSegundosMmSs(ev.remaining_seconds || 900)})`;
+                : `BLOQUEADA (15m: ${formatearSegundosMmSs(ev.remaining_seconds ?? 0)})`;
 
             const badgeEstado = bloqueada
                 ? `<span class="badge bg-danger"><i class="bi bi-lock-fill me-1"></i>${textoEstadoBloqueo}</span>`
@@ -363,7 +408,7 @@
                         <div class="d-flex align-items-center gap-2 flex-wrap">
                             <span class="badge bg-dark font-monospace fs-6 px-3 py-1">${ip}</span>
                             ${macEvento}
-                            <span class="badge bg-danger-subtle text-danger fw-bold">${proto} • Confianza ${conf}%</span>
+                            <span class="badge bg-danger-subtle text-danger fw-bold">${proto} • Confianza ${conf}</span>
                             <span class="badge ${ev.is_lan ? 'bg-info-subtle text-info' : 'bg-warning-subtle text-warning'}">
                                 ${ev.is_lan ? 'Origen Red Local (LAN)' : 'Origen Público (WAN)'}
                             </span>
@@ -460,22 +505,61 @@
         }).join('');
     }
 
-    async function cargarDashboardSoar() {
+    // Delegación segura de eventos por atributos data-* y preservación de duración por IP
+    if (tbodyCuarentenaActiva) {
+        tbodyCuarentenaActiva.addEventListener('click', (evento) => {
+            const btn = evento.target.closest('button[data-action="unblock"]');
+            if (!btn) return;
+            const ipObjetivo = btn.dataset.ip;
+            if (ipObjetivo) {
+                window.desbloquearIpAccion(ipObjetivo);
+            }
+        });
+    }
+
+    if (contenedorFlujoCincoPasos) {
+        contenedorFlujoCincoPasos.addEventListener('click', (evento) => {
+            const btn = evento.target.closest('button[data-action]');
+            if (!btn) return;
+            const accion = btn.dataset.action;
+            const ipObjetivo = btn.dataset.ip;
+            if (!ipObjetivo) return;
+            if (accion === 'unblock') {
+                window.desbloquearIpAccion(ipObjetivo);
+            } else if (accion === 'block') {
+                window.bloquearIpDesdeTarjeta(ipObjetivo, btn.dataset.proto || 'TCP', btn.dataset.selectId || '');
+            }
+        });
+
+        contenedorFlujoCincoPasos.addEventListener('change', (evento) => {
+            const sel = evento.target.closest('select.sel-duracion-tarjeta');
+            if (!sel || !sel.dataset.ip) return;
+            duracionSeleccionadaPorIp.set(sel.dataset.ip, sel.value);
+        });
+    }
+
+    async function cargarDashboardSoar(forzar = false) {
+        if (dashboardEnVuelo) {
+            if (forzar) refrescoPendiente = true;
+            return;
+        }
+        dashboardEnVuelo = true;
         try {
             const resp = await fetch('/api/soar/dashboard');
+            if (verificarSesion401(resp)) return;
             if (resp.status === 403) {
                 localStorage.setItem('cybershield_soar_activo', 'false');
-                window.location.href = '/frontend/configuracion.html';
+                window.location.replace('/frontend/configuracion.html');
                 return;
             }
             if (!resp.ok) return;
             const datos = await resp.json();
 
-            if (switchAutobloqueoIps) {
+            if (switchAutobloqueoIps && !switchAutobloqueoIps.disabled) {
                 switchAutobloqueoIps.checked = Boolean(datos.auto_block);
             }
 
-            actualizarUrlEdlModal(datos.primary_local_ip || '192.168.18.10');
+            actualizarUrlEdlModal(datos.primary_local_ip || '');
 
             const c1 = datos.lock1_protected || {};
             if (kpiGatewayProtegido && c1.primary_gateway) {
@@ -502,11 +586,18 @@
             cuarentenaLocal = Array.isArray(datos.quarantine) ? datos.quarantine : [];
             renderizarTablaCuarentena();
             renderizarFlujoCincoPasos(Array.isArray(datos.events) ? datos.events : []);
-        } catch (_) {}
+        } catch (_) {
+        } finally {
+            dashboardEnVuelo = false;
+            if (refrescoPendiente) {
+                refrescoPendiente = false;
+                cargarDashboardSoar(false);
+            }
+        }
     }
 
     window.bloquearIpAccion = async function (ip, protocolo, modoDuracion) {
-        if (!ip) return;
+        if (!ip) return false;
         const duracion = modoDuracion || 'permanent';
         try {
             const resp = await fetch('/api/soar/block', {
@@ -518,44 +609,51 @@
                     duration_mode: duracion
                 })
             });
+            if (verificarSesion401(resp)) return false;
             const datos = await resp.json().catch(() => ({}));
             if (!resp.ok) {
                 mostrarNotificacionSoar(datos.detail || 'No se pudo bloquear la IP (Candado 1)', true);
-                return;
+                return false;
             }
+            duracionSeleccionadaPorIp.delete(ip.trim());
             const etqDur = datos.is_permanent ? 'Permanentemente (Hasta desbloqueo manual)' : 'por 15 minutos';
             mostrarNotificacionSoar(`IP ${ip} aislada en Firewall (${datos.rule_name}) ${etqDur}`, false);
-            await cargarDashboardSoar();
+            await cargarDashboardSoar(true);
+            return true;
         } catch (_) {
             mostrarNotificacionSoar('Error de comunicación con el motor SOAR', true);
+            return false;
         }
     };
 
     window.bloquearIpDesdeTarjeta = async function (ip, protocolo, idSelector) {
         const elSel = idSelector ? document.getElementById(idSelector) : null;
-        const modo = elSel ? elSel.value : 'permanent';
+        const modo = elSel ? elSel.value : (duracionSeleccionadaPorIp.get(ip) || 'permanent');
         await window.bloquearIpAccion(ip, protocolo, modo);
     };
 
     window.desbloquearIpAccion = async function (ipOReferencia) {
-        if (!ipOReferencia) return;
+        if (!ipOReferencia) return false;
         try {
             const resp = await fetch('/api/soar/unblock', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ip: ipOReferencia.trim(), protocol: 'TCP' })
             });
+            if (verificarSesion401(resp)) return false;
             const datos = await resp.json().catch(() => ({}));
             if (!resp.ok) {
                 mostrarNotificacionSoar(datos.detail || 'No se pudo desbloquear la referencia indicada', true);
-                return;
+                return false;
             }
             const ipResuelta = datos.unblocked_ip || ipOReferencia;
             const macInfo = (datos.mac && datos.mac !== 'N/A (WAN)') ? ` [MAC: ${datos.mac}]` : '';
             mostrarNotificacionSoar(`Atacante ${ipResuelta}${macInfo} desbloqueado y regla ${datos.rule_name} eliminada`, false);
-            await cargarDashboardSoar();
+            await cargarDashboardSoar(true);
+            return true;
         } catch (_) {
             mostrarNotificacionSoar('Error al desbloquear IP/Referencia', true);
+            return false;
         }
     };
 
@@ -579,8 +677,8 @@
         }
 
         const objetivo = filtrados.length === 1 ? filtrados[0].ip : refTexto;
-        await window.desbloquearIpAccion(objetivo);
-        if (inputBuscarCuarentena && filtrados.length <= 1) {
+        const exito = await window.desbloquearIpAccion(objetivo);
+        if (exito && inputBuscarCuarentena && filtrados.length <= 1) {
             inputBuscarCuarentena.value = '';
             renderizarTablaCuarentena();
         }
@@ -613,19 +711,24 @@
             mostrarNotificacionSoar('Ingrese una dirección IP válida para investigar y bloquear', true);
             return;
         }
-        await window.bloquearIpAccion(ip, proto, modoDur);
-        if (inputIpManualBloquear) inputIpManualBloquear.value = '';
+        const exito = await window.bloquearIpAccion(ip, proto, modoDur);
+        if (exito && inputIpManualBloquear) {
+            inputIpManualBloquear.value = '';
+        }
     };
 
     if (switchAutobloqueoIps) {
         switchAutobloqueoIps.addEventListener('change', async (e) => {
             const activo = e.target.checked;
+            const estadoPrevio = !activo;
+            switchAutobloqueoIps.disabled = true;
             try {
                 const resp = await fetch('/api/soar/autoblock', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ auto_block: activo })
                 });
+                if (verificarSesion401(resp)) return;
                 if (resp.ok) {
                     mostrarNotificacionSoar(
                         activo
@@ -633,13 +736,22 @@
                             : 'Modo Manual: Investigará los 5 pasos y esperará su clic para bloqueo Permanente o 15m',
                         false
                     );
+                } else {
+                    const datos = await resp.json().catch(() => ({}));
+                    switchAutobloqueoIps.checked = estadoPrevio;
+                    mostrarNotificacionSoar(datos.detail || 'No se pudo cambiar el estado de autobloqueo IPS en el servidor', true);
                 }
-            } catch (_) {}
+            } catch (_) {
+                switchAutobloqueoIps.checked = estadoPrevio;
+                mostrarNotificacionSoar('Error de conexión: no se pudo actualizar el autobloqueo IPS', true);
+            } finally {
+                switchAutobloqueoIps.disabled = false;
+            }
         });
     }
 
-    // Reloj de cuenta regresiva en tiempo real (1 segundo) solo para reglas temporales (15m)
-    setInterval(() => {
+    // Reloj de cuenta regresiva en tiempo real (1 segundo) con cooldown en expiración (P3-09)
+    const intervaloCountdown = setInterval(() => {
         if (!cuarentenaLocal.length) return;
         let expiroAlguna = false;
         cuarentenaLocal.forEach((item) => {
@@ -652,15 +764,33 @@
             }
             const pill = document.querySelector(`[data-ip-countdown="${CSS.escape(item.ip)}"]`);
             if (pill) {
-                pill.innerHTML = `<i class="bi bi-clock-history me-1"></i>15m (${formatearSegundosMmSs(item.remaining_seconds)})`;
+                pill.innerHTML = `<i class="bi bi-clock-history me-1"></i>15m (${formatearSegundosMmSs(item.remaining_seconds ?? 0)})`;
             }
         });
-        if (expiroAlguna) {
-            cargarDashboardSoar();
+        if (expiroAlguna && !dashboardEnVuelo) {
+            const ahora = Date.now();
+            if (ahora - ultimoRefrescoExpiracionMs >= COOLDOWN_EXPIRACION_MS) {
+                ultimoRefrescoExpiracionMs = ahora;
+                cargarDashboardSoar(false);
+            }
         }
     }, 1000);
 
-    window.cargarDashboardSoar = cargarDashboardSoar;
-    cargarDashboardSoar();
-    setInterval(cargarDashboardSoar, 4000);
+    const intervaloRefrescoSoar = setInterval(() => cargarDashboardSoar(false), 4000);
+
+    if (typeof window.registrarLimpiezaSesion === 'function') {
+        window.registrarLimpiezaSesion(() => {
+            clearInterval(intervaloCountdown);
+            clearInterval(intervaloRefrescoSoar);
+            if (temporizadorToastSoar) {
+                clearTimeout(temporizadorToastSoar);
+                temporizadorToastSoar = null;
+            }
+        });
+    }
+
+    // Inicializar URL EDL con el origen real antes del primer sondeo
+    actualizarUrlEdlModal('');
+    window.cargarDashboardSoar = () => cargarDashboardSoar(true);
+    cargarDashboardSoar(true);
 })();

@@ -7,9 +7,8 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>CyberShield Pyme - Configuración del Sistema</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="/frontend/vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="/frontend/vendor/bootstrap-icons/bootstrap-icons.min.css">
     <style>
         :root {
             --sidebar-width: 250px;
@@ -22,7 +21,7 @@
         }
 
         body {
-            font-family: 'Inter', sans-serif;
+            font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, BlinkMacSystemFont, 'Roboto', 'Helvetica Neue', Arial, sans-serif;
             background-color: var(--bg-light);
             color: #334155;
             overflow-x: hidden;
@@ -216,13 +215,13 @@
                 <a class="nav-link active" href="/frontend/configuracion.html"><i class="bi bi-gear-fill"></i> Configuración</a>
             </li>
             <li class="nav-item">
-                <a class="nav-link" href="/docs" target="_blank"><i class="bi bi-code-slash"></i> API Swagger</a>
+                <a class="nav-link" href="/docs" target="_blank" rel="noopener noreferrer"><i class="bi bi-code-slash"></i> API Swagger</a>
             </li>
         </ul>
         
         <div class="mt-auto p-2 bg-dark bg-opacity-25 rounded small text-secondary">
             <div><i class="bi bi-cpu"></i> NIDS: Conv1D (Capas 3 y 4)</div>
-            <div><i class="bi bi-sliders"></i> Perfil: Operador Pyme</div>
+            <div><i class="bi bi-database"></i> BD Local: SQLite3</div>
         </div>
     </div>
 
@@ -287,6 +286,7 @@
                         <div>
                             <div class="setting-label">Modo Demostración / Consola de Pruebas</div>
                             <p class="setting-desc">Muestra el botón y panel de inyección de tráfico sintético en la cabecera. Desactivar en producción real.</p>
+                            <small id="notaSimulacionServidor" class="text-warning fw-semibold d-none">Deshabilitado en el servidor (ENABLE_SIMULATION=false)</small>
                         </div>
                         <div class="form-check form-switch ps-0">
                             <input class="form-check-input ms-auto" type="checkbox" id="switchMostrarConsola" checked>
@@ -496,10 +496,10 @@
                             <span class="fw-bold small text-dark">Ficha Técnica del Modelo (PE1 / PE2)</span>
                         </div>
                         <ul class="list-unstyled mb-0 small text-secondary">
-                            <li class="mb-1"><i class="bi bi-check2 text-success me-1"></i> <strong>Arquitectura:</strong> Red Neuronal Convolucional 1D (Conv1D + Dropout + Dense)</li>
-                            <li class="mb-1"><i class="bi bi-check2 text-success me-1"></i> <strong>Vector de Entrada:</strong> 80 características canónicas CICFlowMeter / CICIDS2017</li>
-                            <li class="mb-1"><i class="bi bi-check2 text-success me-1"></i> <strong>Modo de Ejecución:</strong> CPU-Only (optimizada para hardware accesible de Pymes)</li>
-                            <li><i class="bi bi-check2 text-success me-1"></i> <strong>Latencia de Inferencia:</strong> Menor a 1.0 ms por flujo de red</li>
+                            <li class="mb-1"><i class="bi bi-check2 text-success me-1"></i> <strong>Arquitectura:</strong> Red Neuronal Convolucional 1D (Conv1D + BatchNorm + MaxPool + Dropout + Dense)</li>
+                            <li class="mb-1"><i class="bi bi-check2 text-success me-1"></i> <strong>Vector de Entrada:</strong> <span id="specVectorEntrada">77 características activas (de 80 canónicas CICFlowMeter / CICIDS2017)</span></li>
+                            <li class="mb-1"><i class="bi bi-check2 text-success me-1"></i> <strong>Modo de Ejecución:</strong> <span id="specEscaladorModo">CPU-Only · MinMaxScaler(0, 1) (optimizada para hardware accesible de Pymes)</span></li>
+                            <li><i class="bi bi-check2 text-success me-1"></i> <strong>Métricas y Latencia (Test):</strong> <span id="specLatenciaModelo">Consultando /api/model...</span></li>
                         </ul>
                     </div>
                 </div>
@@ -518,10 +518,10 @@
 
                     <div class="setting-item">
                         <div>
-                            <div class="setting-label">Captura en Tiempo Real (Scapy)</div>
-                            <p class="setting-desc">Modo promiscuo de interfaz de red escuchando tráfico Ethernet / Wi-Fi</p>
+                            <div class="setting-label">Estado del Motor NIDS / BD / API</div>
+                            <p class="setting-desc">Verificación en vivo desde <code>/api/health</code> y modo promiscuo del sensor Scapy</p>
                         </div>
-                        <span class="badge bg-success-subtle text-success badge-value"><i class="bi bi-broadcast me-1"></i> Activo 24/7</span>
+                        <span id="badgeEstadoSaludSistema" class="badge bg-secondary-subtle text-secondary badge-value"><i class="bi bi-hourglass-split me-1"></i> Verificando...</span>
                     </div>
 
                     <div class="setting-item">
@@ -635,8 +635,8 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="/frontend/js/alarma_global.js?v=16"></script>
-    <script src="/frontend/js/configuracion.js?v=16"></script>
+    <script src="/frontend/vendor/bootstrap/bootstrap.bundle.min.js"></script>
+    <script src="/frontend/js/alarma_global.js?v=18"></script>
+    <script src="/frontend/js/configuracion.js?v=18"></script>
 </body>
 </html>

@@ -19,6 +19,9 @@
     const switchBanner = document.getElementById('switchBanner');
     const selectUmbralDDoS = document.getElementById('selectUmbralDDoS');
 
+    let temporizadorToastConfig = null;
+    let umbralConfirmadoServidor = '50';
+
     const VOCES_NEURALES = {
         'voz_pe_alex': '🇵🇪 Alex (Hombre - Táctica Militar Grave)',
         'voz_pe_camila': '🇵🇪 Camila (Mujer - Alerta Nítida)',
@@ -39,9 +42,33 @@
         'pred_4': 'Ataque DDoS detectado. Activando contramedidas de mitigación.'
     };
 
+    const VELOCIDAD_POR_DEFECTO = (window.VOZ_DEFAULTS_CYBERSHIELD && window.VOZ_DEFAULTS_CYBERSHIELD.VELOCIDAD_POR_DEFECTO) || '0.95';
+
+    function verificarRespuesta(resp) {
+        if (typeof window.verificarRespuestaApi === 'function') {
+            return window.verificarRespuestaApi(resp);
+        }
+        if (resp && resp.status === 401) {
+            window.location.replace('/frontend/login.html');
+            return false;
+        }
+        return Boolean(resp && resp.ok);
+    }
+
     function esPerfilFemenino(perfil) {
-        return perfil.includes('camila') || perfil.includes('dalia') || perfil.includes('elvira') || 
-               perfil.includes('salome') || perfil.includes('paloma') || perfil.startsWith('femenin');
+        if (window.VOZ_DEFAULTS_CYBERSHIELD && typeof window.VOZ_DEFAULTS_CYBERSHIELD.esPerfilFemenino === 'function') {
+            return window.VOZ_DEFAULTS_CYBERSHIELD.esPerfilFemenino(perfil);
+        }
+        const p = String(perfil || '').toLowerCase();
+        return p.includes('camila') || p.includes('dalia') || p.includes('elvira') ||
+               p.includes('salome') || p.includes('paloma') || p.startsWith('femenin');
+    }
+
+    function obtenerTonoPorDefecto(perfil) {
+        if (window.VOZ_DEFAULTS_CYBERSHIELD && typeof window.VOZ_DEFAULTS_CYBERSHIELD.obtenerTonoPorDefecto === 'function') {
+            return parseFloat(window.VOZ_DEFAULTS_CYBERSHIELD.obtenerTonoPorDefecto(perfil));
+        }
+        return esPerfilFemenino(perfil) ? 1.25 : 0.75;
     }
 
     function textoTono(factor) {
@@ -76,6 +103,26 @@
         });
     }
 
+    function aplicarValorUmbralEnSelect(valorPorcentaje) {
+        if (!selectUmbralDDoS) return;
+        const num = Math.round(Number(valorPorcentaje));
+        const valStr = Number.isFinite(num) ? String(num) : '50';
+        let existeOpcion = false;
+        for (let i = 0; i < selectUmbralDDoS.options.length; i++) {
+            if (selectUmbralDDoS.options[i].value === valStr) {
+                existeOpcion = true;
+                break;
+            }
+        }
+        if (!existeOpcion) {
+            const opt = document.createElement('option');
+            opt.value = valStr;
+            opt.textContent = `${valStr}% (Personalizado en Servidor)`;
+            selectUmbralDDoS.appendChild(opt);
+        }
+        selectUmbralDDoS.value = valStr;
+    }
+
     window.cambiarTemaVisual = function (tema) {
         const temaValido = ['claro', 'gris', 'oscuro'].includes(tema) ? tema : 'claro';
         actualizarBotonesTema(temaValido);
@@ -87,7 +134,7 @@
         guardarConfiguracion('cybershield_tema_visual', temaValido, nombres[temaValido]);
     };
 
-    // 2. Carga de Configuración desde localStorage
+    // 2. Carga de Configuración desde localStorage y sincronización con servidor
     function cargarConfiguraciones() {
         const temaGuardado = localStorage.getItem('cybershield_tema_visual') || 'claro';
         actualizarBotonesTema(temaGuardado);
@@ -96,7 +143,9 @@
         }
 
         const mostrarConsola = localStorage.getItem('cybershield_mostrar_consola') !== 'false';
-        if (switchMostrarConsola) switchMostrarConsola.checked = mostrarConsola;
+        if (switchMostrarConsola && !switchMostrarConsola.disabled) {
+            switchMostrarConsola.checked = mostrarConsola;
+        }
 
         const mostrarSelector = localStorage.getItem('cybershield_mostrar_selector_alarma') !== 'false';
         if (switchMostrarSelector) switchMostrarSelector.checked = mostrarSelector;
@@ -113,14 +162,14 @@
         }
 
         const tonoGuardado = localStorage.getItem('cybershield_tono_voz');
-        const factorTono = tonoGuardado !== null ? parseFloat(tonoGuardado) : (esPerfilFemenino(perfil) ? 1.25 : 0.75);
+        const factorTono = tonoGuardado !== null ? parseFloat(tonoGuardado) : obtenerTonoPorDefecto(perfil);
         if (sliderTono) {
             sliderTono.value = Math.round(factorTono * 100);
             if (badgeTono) badgeTono.innerText = textoTono(factorTono);
         }
 
         const velGuardada = localStorage.getItem('cybershield_velocidad_voz');
-        const factorVel = velGuardada !== null ? parseFloat(velGuardada) : 0.95;
+        const factorVel = velGuardada !== null ? parseFloat(velGuardada) : parseFloat(VELOCIDAD_POR_DEFECTO);
         if (sliderVelocidad) {
             sliderVelocidad.value = Math.round(factorVel * 100);
             if (badgeVelocidad) badgeVelocidad.innerText = textoVelocidad(factorVel);
@@ -140,8 +189,8 @@
             selectPlantillaFrase.value = coincidencia;
         }
 
-        const volumen = localStorage.getItem('cybershield_volumen_alerta') !== null 
-            ? parseFloat(localStorage.getItem('cybershield_volumen_alerta')) 
+        const volumen = localStorage.getItem('cybershield_volumen_alerta') !== null
+            ? parseFloat(localStorage.getItem('cybershield_volumen_alerta'))
             : 0.85;
         if (sliderVolumen) {
             sliderVolumen.value = Math.round(volumen * 100);
@@ -154,21 +203,112 @@
         const banner = localStorage.getItem('cybershield_banner_activo') !== 'false';
         if (switchBanner) switchBanner.checked = banner;
 
-        const umbral = localStorage.getItem('cybershield_umbral_ddos') || '50';
-        if (selectUmbralDDoS) selectUmbralDDoS.value = umbral;
+        const umbral = localStorage.getItem('cybershield_umbral_ddos') || umbralConfirmadoServidor;
+        aplicarValorUmbralEnSelect(umbral);
     }
 
-    // 3. Persistencia de Configuración y Notificaciones
+    async function cargarUmbralServidor() {
+        try {
+            const resp = await fetch('/api/settings/threshold');
+            if (!verificarRespuesta(resp)) return;
+            const datos = await resp.json();
+            if (datos && Number.isFinite(Number(datos.threshold_percent))) {
+                umbralConfirmadoServidor = String(Math.round(Number(datos.threshold_percent)));
+                localStorage.setItem('cybershield_umbral_ddos', umbralConfirmadoServidor);
+                aplicarValorUmbralEnSelect(umbralConfirmadoServidor);
+            }
+        } catch (error) {
+            console.warn('No se pudo leer el umbral del servidor:', error);
+        }
+    }
+
+    async function cargarEstadoSaludYModelo() {
+        const badgeSalud = document.getElementById('badgeEstadoSaludSistema');
+        try {
+            const respSalud = await fetch('/api/health');
+            const datosSalud = await respSalud.json().catch(() => null);
+            if (badgeSalud) {
+                badgeSalud.textContent = '';
+                const ic = document.createElement('i');
+                const sp = document.createElement('span');
+                if (respSalud.ok && datosSalud && datosSalud.status === 'online') {
+                    badgeSalud.className = 'badge bg-success-subtle text-success badge-value';
+                    ic.className = 'bi bi-broadcast me-1';
+                    const wsActivos = Number.isFinite(Number(datosSalud.active_websockets)) ? Number(datosSalud.active_websockets) : 0;
+                    sp.textContent = `API y BD en Línea (WS: ${wsActivos})`;
+                } else {
+                    badgeSalud.className = 'badge bg-warning-subtle text-warning badge-value';
+                    ic.className = 'bi bi-exclamation-triangle-fill me-1';
+                    sp.textContent = 'Servicio Degradado';
+                }
+                badgeSalud.append(ic, sp);
+            }
+        } catch (_) {
+            if (badgeSalud) {
+                badgeSalud.className = 'badge bg-danger-subtle text-danger badge-value';
+                badgeSalud.textContent = '';
+                const ic = document.createElement('i');
+                ic.className = 'bi bi-wifi-off me-1';
+                const sp = document.createElement('span');
+                sp.textContent = 'Sin Conexión API';
+                badgeSalud.append(ic, sp);
+            }
+        }
+
+        try {
+            const respModelo = await fetch('/api/model');
+            if (!verificarRespuesta(respModelo)) return;
+            const info = await respModelo.json();
+
+            const elVec = document.getElementById('specVectorEntrada');
+            if (elVec && Number.isFinite(Number(info.n_features))) {
+                elVec.textContent = `${Number(info.n_features)} características activas (de 80 canónicas CICFlowMeter / CICIDS2017)`;
+            }
+
+            const elEsc = document.getElementById('specEscaladorModo');
+            if (elEsc && info.scaler) {
+                elEsc.textContent = `CPU-Only · ${info.scaler} (optimizada para hardware accesible de Pymes)`;
+            }
+
+            const elLat = document.getElementById('specLatenciaModelo');
+            if (elLat) {
+                const partes = [];
+                if (info.latency && Number.isFinite(Number(info.latency.single_flow_warm_ms))) {
+                    const loteTxt = Number.isFinite(Number(info.latency.avg_per_flow_ms))
+                        ? ` (${Number(info.latency.avg_per_flow_ms).toFixed(3)} ms en lote)`
+                        : '';
+                    partes.push(`${Number(info.latency.single_flow_warm_ms).toFixed(2)} ms/flujo${loteTxt}`);
+                }
+                if (info.test_metrics && Number.isFinite(Number(info.test_metrics.accuracy))) {
+                    partes.push(`Exactitud Test: ${(Number(info.test_metrics.accuracy) * 100).toFixed(2)}%`);
+                }
+                if (info.test_metrics && Number.isFinite(Number(info.test_metrics.fpr))) {
+                    partes.push(`FPR: ${(Number(info.test_metrics.fpr) * 100).toFixed(2)}%`);
+                }
+                elLat.textContent = partes.length ? partes.join(' · ') : 'Modelo listo en CPU';
+            }
+
+            if (Number.isFinite(Number(info.decision_threshold))) {
+                umbralConfirmadoServidor = String(Math.round(Number(info.decision_threshold) * 100));
+                localStorage.setItem('cybershield_umbral_ddos', umbralConfirmadoServidor);
+                aplicarValorUmbralEnSelect(umbralConfirmadoServidor);
+            }
+        } catch (error) {
+            console.warn('No se pudo consultar /api/model:', error);
+        }
+    }
+
+    // 3. Persistencia de Configuración y Notificaciones Seguras (P3-04: sin innerHTML)
     function guardarConfiguracion(clave, valor, mensajeToast) {
         localStorage.setItem(clave, valor);
         if (typeof window.aplicarPreferenciasInterfaz === 'function') {
             window.aplicarPreferenciasInterfaz();
         }
         window.dispatchEvent(new Event('storage'));
-        mostrarToastGuardado(mensajeToast || 'Preferencia guardada');
+        mostrarToastGuardado(mensajeToast || 'Preferencia guardada', false);
     }
 
-    function mostrarToastGuardado(mensaje) {
+    function mostrarToastGuardado(mensaje, esError = false) {
         let toast = document.getElementById('toast-confirmacion-ajustes');
         if (!toast) {
             toast = document.createElement('div');
@@ -195,22 +335,33 @@
             `;
             document.body.appendChild(toast);
         }
-        toast.innerHTML = `<i class="bi bi-check-circle-fill text-success fs-5"></i> <span>${mensaje}</span>`;
+
+        toast.textContent = '';
+        const icono = document.createElement('i');
+        icono.className = esError
+            ? 'bi bi-exclamation-triangle-fill text-warning fs-5'
+            : 'bi bi-check-circle-fill text-success fs-5';
+        const spanMensaje = document.createElement('span');
+        spanMensaje.textContent = String(mensaje ?? '');
+        toast.append(icono, spanMensaje);
+
         toast.style.opacity = '1';
         toast.style.transform = 'translateY(0)';
 
-        setTimeout(() => {
+        if (temporizadorToastConfig) clearTimeout(temporizadorToastConfig);
+        temporizadorToastConfig = setTimeout(() => {
             if (toast) {
                 toast.style.opacity = '0';
                 toast.style.transform = 'translateY(20px)';
             }
-        }, 2600);
+            temporizadorToastConfig = null;
+        }, 2800);
     }
 
     // 4. Asignación de Escuchadores de Eventos
     if (switchMostrarConsola) {
         switchMostrarConsola.addEventListener('change', (e) => {
-            guardarConfiguracion('cybershield_mostrar_consola', e.target.checked ? 'true' : 'false', 
+            guardarConfiguracion('cybershield_mostrar_consola', e.target.checked ? 'true' : 'false',
                 e.target.checked ? 'Consola de pruebas habilitada en Monitor' : 'Consola de pruebas oculta (Modo Producción)');
         });
     }
@@ -231,19 +382,26 @@
 
     if (selectModoAlarma) {
         selectModoAlarma.addEventListener('change', (e) => {
-            guardarConfiguracion('cybershield_modo_alerta', e.target.value, `Modo de alarma: ${selectModoAlarma.options[selectModoAlarma.selectedIndex].text}`);
+            const modoSel = e.target.value;
+            if (typeof window.cambiarModoAlertaGlobal === 'function') {
+                window.cambiarModoAlertaGlobal(modoSel);
+            }
+            guardarConfiguracion('cybershield_modo_alerta', modoSel, `Modo de alarma: ${selectModoAlarma.options[selectModoAlarma.selectedIndex].text}`);
         });
     }
 
     function obtenerParametrosAcusticosActuales() {
         const perfil = selectPerfilVoz ? selectPerfilVoz.value : 'voz_pe_alex';
         const frase = (inputFraseTexto ? inputFraseTexto.value : '').trim() || 'Peligro. El sistema está sufriendo un ataque.';
-        const tono = sliderTono ? (parseFloat(sliderTono.value) / 100.0).toFixed(2) : (localStorage.getItem('cybershield_tono_voz') || '1.00');
-        const velocidad = sliderVelocidad ? (parseFloat(sliderVelocidad.value) / 100.0).toFixed(2) : (localStorage.getItem('cybershield_velocidad_voz') || '1.00');
+        const tonoPorDefecto = obtenerTonoPorDefecto(perfil).toFixed(2);
+        const tono = sliderTono ? (parseFloat(sliderTono.value) / 100.0).toFixed(2) : (localStorage.getItem('cybershield_tono_voz') || tonoPorDefecto);
+        const velocidad = sliderVelocidad ? (parseFloat(sliderVelocidad.value) / 100.0).toFixed(2) : (localStorage.getItem('cybershield_velocidad_voz') || VELOCIDAD_POR_DEFECTO);
         return { perfil, frase, tono, velocidad };
     }
 
     function precargarAudioNeural(perfil, texto, tono, velocidad) {
+        const modoActual = localStorage.getItem('cybershield_modo_alerta') || 'intimidante';
+        if (modoActual !== 'intimidante') return;
         const { perfil: pDef, frase: tDef, tono: tonoDef, velocidad: velDef } = obtenerParametrosAcusticosActuales();
         const p = perfil || pDef;
         const t = texto || tDef;
@@ -255,14 +413,14 @@
     if (selectPerfilVoz) {
         selectPerfilVoz.addEventListener('change', (e) => {
             const perfil = e.target.value;
-            guardarConfiguracion('cybershield_perfil_voz', perfil, `Voz cambiada a: ${selectPerfilVoz.options[selectPerfilVoz.selectedIndex].text}`);
-            
-            const nuevoTono = esPerfilFemenino(perfil) ? 1.25 : 0.75;
+            const nuevoTono = obtenerTonoPorDefecto(perfil);
             if (sliderTono) {
                 sliderTono.value = Math.round(nuevoTono * 100);
                 if (badgeTono) badgeTono.innerText = textoTono(nuevoTono);
             }
+            // Actualizar cybershield_tono_voz ANTES de despachar el evento storage (P3-11)
             localStorage.setItem('cybershield_tono_voz', nuevoTono.toFixed(2));
+            guardarConfiguracion('cybershield_perfil_voz', perfil, `Voz cambiada a: ${selectPerfilVoz.options[selectPerfilVoz.selectedIndex].text}`);
 
             precargarAudioNeural(perfil, null, nuevoTono.toFixed(2), null);
         });
@@ -338,15 +496,19 @@
         if (!inputFraseTexto) return;
         const texto = inputFraseTexto.value.trim();
         if (!texto) {
-            mostrarToastGuardado('Por favor escribe una frase válida');
+            mostrarToastGuardado('Por favor escribe una frase válida', true);
             return;
         }
         guardarConfiguracion('cybershield_frase_texto', texto, 'Frase de emergencia guardada con éxito');
 
-        mostrarToastGuardado('Guardando frase y modulando audio neural en español...');
+        const modoActual = localStorage.getItem('cybershield_modo_alerta') || 'intimidante';
+        if (modoActual !== 'intimidante') return;
+
+        mostrarToastGuardado('Guardando frase y modulando audio neural en español...', false);
         const { perfil, tono, velocidad } = obtenerParametrosAcusticosActuales();
-        fetch(`/api/tts/audio?voice=${encodeURIComponent(perfil)}&text=${encodeURIComponent(texto)}&pitch=${encodeURIComponent(tono)}&rate=${encodeURIComponent(velocidad)}`).then(() => {
-            mostrarToastGuardado('Audio neural listo y guardado');
+        fetch(`/api/tts/audio?voice=${encodeURIComponent(perfil)}&text=${encodeURIComponent(texto)}&pitch=${encodeURIComponent(tono)}&rate=${encodeURIComponent(velocidad)}`).then((resp) => {
+            if (!verificarRespuesta(resp)) return;
+            mostrarToastGuardado('Audio neural listo y guardado', false);
         }).catch(() => {});
     };
 
@@ -375,15 +537,44 @@
         });
     }
 
+    // Sincronización confirmada con servidor para el Umbral Conv1D (P3-08)
     if (selectUmbralDDoS) {
-        selectUmbralDDoS.addEventListener('change', (e) => {
-            const valUmbral = parseFloat(e.target.value) || 75;
-            guardarConfiguracion('cybershield_umbral_ddos', String(valUmbral), `Umbral de detección Conv1D: ${valUmbral}%`);
-            fetch('/api/settings/threshold', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ threshold_percent: valUmbral })
-            }).catch(() => {});
+        selectUmbralDDoS.addEventListener('change', async (e) => {
+            const valorAnterior = umbralConfirmadoServidor;
+            const valUmbral = parseFloat(e.target.value);
+            if (!Number.isFinite(valUmbral)) {
+                aplicarValorUmbralEnSelect(valorAnterior);
+                return;
+            }
+            selectUmbralDDoS.disabled = true;
+            try {
+                const resp = await fetch('/api/settings/threshold', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ threshold_percent: valUmbral })
+                });
+                if (resp.status === 401) {
+                    verificarRespuesta(resp);
+                    return;
+                }
+                const datos = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    aplicarValorUmbralEnSelect(valorAnterior);
+                    mostrarToastGuardado(datos.detail || `Error actualizando umbral en servidor. Revertido a ${valorAnterior}%.`, true);
+                    return;
+                }
+                const confirmado = Number.isFinite(Number(datos.threshold_percent))
+                    ? String(Math.round(Number(datos.threshold_percent)))
+                    : String(Math.round(valUmbral));
+                umbralConfirmadoServidor = confirmado;
+                aplicarValorUmbralEnSelect(confirmado);
+                guardarConfiguracion('cybershield_umbral_ddos', confirmado, `Umbral de detección Conv1D confirmado: ${confirmado}%`);
+            } catch (_) {
+                aplicarValorUmbralEnSelect(valorAnterior);
+                mostrarToastGuardado(`Sin conexión con el servidor. Umbral revertido a ${valorAnterior}%.`, true);
+            } finally {
+                selectUmbralDDoS.disabled = false;
+            }
         });
     }
 
@@ -397,7 +588,7 @@
         localStorage.setItem('cybershield_velocidad_voz', velocidad);
 
         const textoVoz = selectPerfilVoz ? selectPerfilVoz.options[selectPerfilVoz.selectedIndex].text : 'Voz Neural';
-        mostrarToastGuardado(`Generando voz neural en español: ${textoVoz} (${tono}x, ${velocidad}x)...`);
+        mostrarToastGuardado(`Generando voz neural en español: ${textoVoz} (${tono}x, ${velocidad}x)...`, false);
 
         const urlAudio = `/api/tts/audio?voice=${encodeURIComponent(perfil)}&text=${encodeURIComponent(frase)}&pitch=${encodeURIComponent(tono)}&rate=${encodeURIComponent(velocidad)}`;
 
@@ -410,10 +601,10 @@
             window.audioPruebaActual = aud;
 
             aud.play().then(() => {
-                mostrarToastGuardado(`Reproduciendo voz neural: ${textoVoz} (Tono: ${tono}x, Vel: ${velocidad}x)`);
+                mostrarToastGuardado(`Reproduciendo voz neural: ${textoVoz} (Tono: ${tono}x, Vel: ${velocidad}x)`, false);
             }).catch((err) => {
                 console.warn('Reproducción bloqueada por navegador:', err);
-                mostrarToastGuardado('Haz clic en la pantalla para autorizar el audio');
+                mostrarToastGuardado('Haz clic en la pantalla para autorizar el audio', true);
             });
         } catch (e) {
             console.error('Error probando audio:', e);
@@ -425,15 +616,34 @@
         localStorage.setItem('cybershield_frase_texto', frase);
         if (typeof window.reproducirAlarmaGlobal === 'function') {
             window.reproducirAlarmaGlobal(frase, true);
-            mostrarToastGuardado('Probando ciclo completo: Sirena Táctica + Voz Neural');
+            mostrarToastGuardado('Probando ciclo completo: Sirena Táctica + Voz Neural', false);
         } else {
             window.probarVozYFraseActual();
         }
     };
 
-    // 6. Restablecimiento de Valores Predeterminados
-    window.restablecerValoresFabrica = function () {
+    // 6. Restablecimiento de Valores Predeterminados (sincronizado con POST /api/settings/threshold = 50)
+    window.restablecerValoresFabrica = async function () {
         if (!confirm('¿Deseas restablecer todas las configuraciones a sus valores predeterminados?')) return;
+
+        let umbralRestablecidoServidor = false;
+        try {
+            const resp = await fetch('/api/settings/threshold', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ threshold_percent: 50 })
+            });
+            if (resp.status === 401) {
+                verificarRespuesta(resp);
+                return;
+            }
+            if (resp.ok) {
+                umbralRestablecidoServidor = true;
+                umbralConfirmadoServidor = '50';
+            }
+        } catch (_) {
+            umbralRestablecidoServidor = false;
+        }
 
         localStorage.removeItem('cybershield_tema_visual');
         localStorage.removeItem('cybershield_mostrar_consola');
@@ -445,14 +655,25 @@
         localStorage.removeItem('cybershield_velocidad_voz');
         localStorage.removeItem('cybershield_frase_texto');
         localStorage.removeItem('cybershield_volumen_alerta');
-        localStorage.removeItem('cybershield_audio_frase');
         localStorage.removeItem('cybershield_destello_activo');
         localStorage.removeItem('cybershield_banner_activo');
-        localStorage.removeItem('cybershield_umbral_ddos');
+        if (umbralRestablecidoServidor) {
+            localStorage.setItem('cybershield_umbral_ddos', '50');
+        } else {
+            localStorage.setItem('cybershield_umbral_ddos', umbralConfirmadoServidor);
+        }
+
+        if (typeof window.cambiarModoAlertaGlobal === 'function') {
+            window.cambiarModoAlertaGlobal('intimidante');
+        }
 
         cargarConfiguraciones();
         window.dispatchEvent(new Event('storage'));
-        mostrarToastGuardado('Valores predeterminados restablecidos');
+        if (umbralRestablecidoServidor) {
+            mostrarToastGuardado('Valores predeterminados restablecidos (umbral Conv1D en 50%)', false);
+        } else {
+            mostrarToastGuardado(`Preferencias locales restablecidas, pero no se pudo restablecer el umbral en el servidor (sigue en ${umbralConfirmadoServidor}%)`, true);
+        }
     };
 
     // 7. Control del Módulo de Bloqueo Inteligente y Análisis SOAR (Contraseña Maestra)
@@ -491,13 +712,19 @@
         estadoConfirmadoSoar = Boolean(activo);
         if (switchModuloSoar) switchModuloSoar.checked = estadoConfirmadoSoar;
         if (badgeEstadoSoar) {
+            badgeEstadoSoar.textContent = '';
+            const ic = document.createElement('i');
+            const sp = document.createElement('span');
             if (estadoConfirmadoSoar) {
                 badgeEstadoSoar.className = 'badge bg-success-subtle text-success badge-value';
-                badgeEstadoSoar.innerHTML = '<i class="bi bi-shield-fill-check me-1"></i> Activo (SOAR + IPS)';
+                ic.className = 'bi bi-shield-fill-check me-1';
+                sp.textContent = 'Activo (SOAR + IPS)';
             } else {
                 badgeEstadoSoar.className = 'badge bg-secondary-subtle text-secondary badge-value';
-                badgeEstadoSoar.innerHTML = '<i class="bi bi-lock-fill me-1"></i> Desactivado (Aislado)';
+                ic.className = 'bi bi-lock-fill me-1';
+                sp.textContent = 'Desactivado (Aislado)';
             }
+            badgeEstadoSoar.append(ic, sp);
         }
         if (panelAccesoRapidoSoar) {
             if (estadoConfirmadoSoar) {
@@ -532,7 +759,7 @@
     async function cargarEstadoInicialSoar() {
         try {
             const resp = await fetch('/api/soar/status');
-            if (!resp.ok) {
+            if (!verificarRespuesta(resp)) {
                 reflejarEstadoVisualSoar(false);
                 return;
             }
@@ -561,6 +788,10 @@
                     master_password: clave
                 })
             });
+            if (resp.status === 401) {
+                verificarRespuesta(resp);
+                return;
+            }
             const datos = await resp.json().catch(() => ({}));
             if (!resp.ok) {
                 if (textoErrorClaveSoar) {
@@ -573,7 +804,7 @@
 
             cerrarModalSoar();
             reflejarEstadoVisualSoar(Boolean(datos.enabled));
-            mostrarToastGuardado(datos.message || (datos.enabled ? 'Módulo SOAR activado' : 'Módulo SOAR desactivado y Firewall limpio'));
+            mostrarToastGuardado(datos.message || (datos.enabled ? 'Módulo SOAR activado' : 'Módulo SOAR desactivado y Firewall limpio'), false);
         } catch (err) {
             if (textoErrorClaveSoar) textoErrorClaveSoar.textContent = 'Error de conexión con el servidor';
             if (alertaErrorClaveSoar) alertaErrorClaveSoar.classList.remove('d-none');
@@ -610,5 +841,7 @@
     }
 
     cargarConfiguraciones();
+    cargarUmbralServidor();
+    cargarEstadoSaludYModelo();
     cargarEstadoInicialSoar();
 })();
