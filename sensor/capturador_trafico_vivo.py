@@ -924,6 +924,13 @@ class DespachadorApi(threading.Thread):
         self.sesion = requests.Session()
         if clave_api:
             self.sesion.headers["X-API-Key"] = clave_api
+        if str(url_destino or "").lower().startswith("https://"):
+            ca_env = (os.getenv("API_CA_CERT") or "").strip()
+            ca_default = os.path.join(_directorio_base, "backend", "certs", "cert.pem")
+            if ca_env and os.path.exists(ca_env):
+                self.sesion.verify = ca_env
+            elif os.path.exists(ca_default):
+                self.sesion.verify = ca_default
         self.estadisticas = {"enviados": 0, "ddos": 0, "descartados": 0, "errores": 0}
         self._bloqueo_estadisticas = threading.Lock()
         self._evento_parada = threading.Event()

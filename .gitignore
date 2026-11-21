@@ -52,6 +52,14 @@ logs/
 Thumbs.db
 desktop.ini
 
+# Certificados TLS, cachés locales de red, audios generados y servicio local
+backend/certs/
+*.pem
+*.key
+backend/lan_arp_cache.json
+frontend/audio/custom_*.mp3
+cybershield-nids.service
+
 # Compilación y distribución
 dist/
 build/

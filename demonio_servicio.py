@@ -13,6 +13,7 @@ from backend.configuracion import DIRECTORIO_BASE, configuracion
 
 NOMBRE_TAREA_WINDOWS = "CyberShield_Pyme_NIDS_24x7"
 ARCHIVO_PID_DEMONIO = os.path.join(configuracion.directorio_logs, "cybershield_demonio.pid")
+PREFIJO_REGLA_FIREWALL = "CyberShield_Block_"
 
 
 # --- Configuración de Registro (Logger) ---
@@ -43,6 +44,51 @@ logger_demonio = configurar_logger_demonio()
 
 
 # --- Utilidades de Procesos y Red ---
+def _obtener_ejecutable_python_consola() -> str:
+    if os.name == "nt" and sys.executable.lower().endswith("pythonw.exe"):
+        candidato = os.path.join(os.path.dirname(sys.executable), "python.exe")
+        if os.path.exists(candidato):
+            return candidato
+    return sys.executable
+
+
+def _abrir_log_consola_oculta_rotado():
+    os.makedirs(configuracion.directorio_logs, exist_ok=True)
+    ruta_salida = os.path.join(configuracion.directorio_logs, "cybershield_consola_oculta.log")
+    max_bytes = max(1024 * 1024, int(configuracion.tamano_maximo_log_bytes))
+    try:
+        if os.path.exists(ruta_salida) and os.path.getsize(ruta_salida) >= max_bytes:
+            respaldo = ruta_salida + ".1"
+            if os.path.exists(respaldo):
+                os.remove(respaldo)
+            os.replace(ruta_salida, respaldo)
+    except Exception:
+        pass
+    return open(ruta_salida, "a", encoding="utf-8")
+
+
+def _limpiar_reglas_firewall_huerfanas() -> None:
+    if os.name != "nt":
+        return
+    try:
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                f"Remove-NetFirewallRule -DisplayName '{PREFIJO_REGLA_FIREWALL}*' -ErrorAction SilentlyContinue",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        logger_demonio.info("Limpieza preventiva de reglas %s* ejecutada tras reinicio forzado del API.", PREFIJO_REGLA_FIREWALL)
+    except Exception:
+        pass
+
+
 def construir_comando_api(host: str, puerto: int) -> list:
     ejecutable_py = _obtener_ejecutable_python_consola()
     comando = [
@@ -73,14 +119,6 @@ def verificar_salud_http(puerto: int, usar_https: bool) -> bool:
             return respuesta.status == 200
     except Exception:
         return False
-
-
-def _obtener_ejecutable_python_consola() -> str:
-    if os.name == "nt" and sys.executable.lower().endswith("pythonw.exe"):
-        candidato = os.path.join(os.path.dirname(sys.executable), "python.exe")
-        if os.path.exists(candidato):
-            return candidato
-    return sys.executable
 
 
 def _detener_instancia_en_segundo_plano() -> None:
@@ -134,15 +172,23 @@ def _detener_instancia_en_segundo_plano() -> None:
 
 
 # --- Gestión de Servicio (Windows / Linux systemd) ---
-def instalar_servicio_windows(con_sensor: bool = False) -> int:
+def instalar_servicio_windows(con_sensor: bool = False, host: str = "0.0.0.0", puerto: int = 8000) -> int:
     _detener_instancia_en_segundo_plano()
     ruta_script = os.path.abspath(__file__)
     ejecutable_py = _obtener_ejecutable_python_consola()
-    argumentos_extra = " --con-sensor" if con_sensor else ""
+    partes_extra = ["--oculto"]
+    if con_sensor:
+        partes_extra.append("--con-sensor")
+    if host != "0.0.0.0":
+        partes_extra.extend(["--host", host])
+    if puerto != 8000:
+        partes_extra.extend(["--puerto", str(puerto)])
+    argumentos_extra = " " + " ".join(partes_extra)
+
     ejecutable_w = os.path.join(os.path.dirname(ejecutable_py), "pythonw.exe")
     if not os.path.exists(ejecutable_w):
         ejecutable_w = ejecutable_py
-    comando_tarea = f'"{ejecutable_w}" "{ruta_script}" --oculto{argumentos_extra}'
+    comando_tarea = f'"{ejecutable_w}" "{ruta_script}"{argumentos_extra}'
 
     cmd = [
         "schtasks",
@@ -159,6 +205,10 @@ def instalar_servicio_windows(con_sensor: bool = False) -> int:
     ]
     resultado = subprocess.run(cmd, capture_output=True, text=True)
     if resultado.returncode != 0:
+        logger_demonio.warning(
+            "No fue posible registrar la tarea con privilegios elevados (/RL HIGHEST); "
+            "reintentando con /RL LIMITED (SOAR/netsh y captura Npcap requieren Administrador)."
+        )
         cmd_limitado = [
             "schtasks",
             "/Create",
@@ -182,6 +232,8 @@ def instalar_servicio_windows(con_sensor: bool = False) -> int:
         if res_run.returncode == 0:
             logger_demonio.info("Tarea '%s' existente reactivada exitosamente en segundo plano.", NOMBRE_TAREA_WINDOWS)
         else:
+            cmd_ps_esc = comando_tarea.replace("'", "''")
+            dir_ps_esc = DIRECTORIO_BASE.replace("'", "''")
             cmd_wmi = [
                 "powershell",
                 "-NoProfile",
@@ -190,7 +242,7 @@ def instalar_servicio_windows(con_sensor: bool = False) -> int:
                 "-Command",
                 (
                     f"Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
-                    f"-Arguments @{{CommandLine='{comando_tarea}'; CurrentDirectory='{DIRECTORIO_BASE}'}} | Out-Null"
+                    f"-Arguments @{{CommandLine='{cmd_ps_esc}'; CurrentDirectory='{dir_ps_esc}'}} | Out-Null"
                 ),
             ]
             res_wmi = subprocess.run(cmd_wmi, capture_output=True, text=True)
@@ -199,22 +251,16 @@ def instalar_servicio_windows(con_sensor: bool = False) -> int:
                     getattr(subprocess, "CREATE_NO_WINDOW", 0)
                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                 )
-                args_proceso = [ejecutable_py, ruta_script, "--oculto"]
-                if con_sensor:
-                    args_proceso.append("--con-sensor")
-
-                os.makedirs(configuracion.directorio_logs, exist_ok=True)
-                ruta_salida_oculta = os.path.join(configuracion.directorio_logs, "cybershield_consola_oculta.log")
-                archivo_salida = open(ruta_salida_oculta, "a", encoding="utf-8")
-
-                subprocess.Popen(
-                    args_proceso,
-                    cwd=DIRECTORIO_BASE,
-                    stdin=subprocess.DEVNULL,
-                    stdout=archivo_salida,
-                    stderr=archivo_salida,
-                    creationflags=banderas_creacion,
-                )
+                args_proceso = [ejecutable_py, ruta_script] + partes_extra
+                with _abrir_log_consola_oculta_rotado() as archivo_salida:
+                    subprocess.Popen(
+                        args_proceso,
+                        cwd=DIRECTORIO_BASE,
+                        stdin=subprocess.DEVNULL,
+                        stdout=archivo_salida,
+                        stderr=archivo_salida,
+                        creationflags=banderas_creacion,
+                    )
 
     logger_demonio.info("Iniciando motor IA Conv1D y Sensor en segundo plano (sin ventanas)...")
     usar_https = bool(
@@ -223,16 +269,29 @@ def instalar_servicio_windows(con_sensor: bool = False) -> int:
         and os.path.exists(configuracion.archivo_certificado_ssl)
         and os.path.exists(configuracion.archivo_clave_ssl)
     )
-    for _ in range(20):
+    esquema = "https" if usar_https else "http"
+    salud_ok = False
+    for _ in range(25):
         time.sleep(1.0)
-        if verificar_salud_http(8000, usar_https):
+        if verificar_salud_http(puerto, usar_https):
+            salud_ok = True
             break
 
-    logger_demonio.info(
-        "LISTO: CyberShield Pyme está corriendo 100%% oculto en segundo plano en http://localhost:8000. "
-        "Puede cerrar TODAS las ventanas de PowerShell."
+    if salud_ok:
+        logger_demonio.info(
+            "LISTO: CyberShield Pyme está corriendo 100%% oculto en segundo plano en %s://localhost:%d. "
+            "Puede cerrar TODAS las ventanas de PowerShell.",
+            esquema,
+            puerto,
+        )
+        return 0
+
+    logger_demonio.error(
+        "El servicio no respondió en %s://127.0.0.1:%d/api/health tras 25s. Revise logs/cybershield_api.log.",
+        esquema,
+        puerto,
     )
-    return 0
+    return 1
 
 
 def desinstalar_servicio_windows() -> int:
@@ -240,13 +299,22 @@ def desinstalar_servicio_windows() -> int:
     subprocess.run(["schtasks", "/End", "/TN", NOMBRE_TAREA_WINDOWS], capture_output=True, text=True)
     cmd = ["schtasks", "/Delete", "/TN", NOMBRE_TAREA_WINDOWS, "/F"]
     resultado = subprocess.run(cmd, capture_output=True, text=True)
-    logger_demonio.info("Procesos en segundo plano detenidos y tarea '%s' eliminada.", NOMBRE_TAREA_WINDOWS)
-    return 0 if resultado.returncode == 0 else 0
+    _limpiar_reglas_firewall_huerfanas()
+    if resultado.returncode == 0:
+        logger_demonio.info("Procesos en segundo plano detenidos y tarea '%s' eliminada.", NOMBRE_TAREA_WINDOWS)
+        return 0
+    salida = ((resultado.stdout or "") + " " + (resultado.stderr or "")).lower()
+    if "no existe" in salida or "cannot find" in salida or "does not exist" in salida:
+        logger_demonio.info("Procesos detenidos; la tarea '%s' no existía.", NOMBRE_TAREA_WINDOWS)
+        return 0
+    logger_demonio.error("Error eliminando tarea '%s': %s", NOMBRE_TAREA_WINDOWS, salida.strip()[:200])
+    return resultado.returncode
 
 
 def generar_unidad_systemd(ruta_destino: str = None) -> str:
     if not ruta_destino:
         ruta_destino = os.path.join(DIRECTORIO_BASE, "cybershield-nids.service")
+    ruta_log = os.path.join(configuracion.directorio_logs, "cybershield_demonio.log")
     contenido = f"""[Unit]
 Description=CyberShield Pyme - Demonio NIDS Conv1D 24/7
 After=network-online.target
@@ -254,12 +322,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory={DIRECTORIO_BASE}
-ExecStart={sys.executable} {os.path.abspath(__file__)} --con-sensor
+WorkingDirectory="{DIRECTORIO_BASE}"
+ExecStart="{sys.executable}" "{os.path.abspath(__file__)}" --con-sensor
 Restart=always
 RestartSec=5
-StandardOutput=append:{os.path.join(configuracion.directorio_logs, 'cybershield_demonio.log')}
-StandardError=append:{os.path.join(configuracion.directorio_logs, 'cybershield_demonio.log')}
+StandardOutput=append:{ruta_log}
+StandardError=append:{ruta_log}
 LimitNOFILE=65535
 
 [Install]
@@ -306,9 +374,7 @@ def ejecutar_bucle_supervisor(host: str, puerto: int, con_sensor: bool, oculto: 
     kwargs_popen = {"cwd": DIRECTORIO_BASE}
     archivo_consola_hijos = None
     if oculto or (os.name == "nt" and sys.executable.lower().endswith("pythonw.exe")):
-        os.makedirs(configuracion.directorio_logs, exist_ok=True)
-        ruta_salida_oculta = os.path.join(configuracion.directorio_logs, "cybershield_consola_oculta.log")
-        archivo_consola_hijos = open(ruta_salida_oculta, "a", encoding="utf-8")
+        archivo_consola_hijos = _abrir_log_consola_oculta_rotado()
         kwargs_popen["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         kwargs_popen["stdin"] = subprocess.DEVNULL
         kwargs_popen["stdout"] = archivo_consola_hijos
@@ -377,14 +443,18 @@ def ejecutar_bucle_supervisor(host: str, puerto: int, con_sensor: bool, oculto: 
                     )
                     if fallos_consecutivos_salud >= 3 and proceso_api is not None:
                         logger_demonio.error("Servidor API congelado. Forzando reinicio del proceso hijo...")
+                        forzado_kill = False
                         try:
                             proceso_api.terminate()
                             proceso_api.wait(timeout=5)
                         except Exception:
                             try:
                                 proceso_api.kill()
+                                forzado_kill = True
                             except Exception:
                                 pass
+                        if forzado_kill:
+                            _limpiar_reglas_firewall_huerfanas()
                         proceso_api = None
 
             time.sleep(1.0)
@@ -400,6 +470,11 @@ def ejecutar_bucle_supervisor(host: str, puerto: int, con_sensor: bool, oculto: 
                         proc.kill()
                     except Exception:
                         pass
+        if archivo_consola_hijos is not None:
+            try:
+                archivo_consola_hijos.close()
+            except Exception:
+                pass
         try:
             if os.path.exists(ARCHIVO_PID_DEMONIO):
                 os.remove(ARCHIVO_PID_DEMONIO)
@@ -421,7 +496,7 @@ def principal() -> None:
     argumentos = analizador.parse_args()
 
     if argumentos.instalar_windows:
-        sys.exit(instalar_servicio_windows(argumentos.con_sensor))
+        sys.exit(instalar_servicio_windows(argumentos.con_sensor, host=argumentos.host, puerto=argumentos.puerto))
     if argumentos.desinstalar_windows:
         sys.exit(desinstalar_servicio_windows())
     if argumentos.generar_systemd:

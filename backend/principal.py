@@ -9,10 +9,12 @@ import ipaddress
 import logging
 import os
 import socket
+import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, List, Literal, Optional
+from urllib.parse import urlparse
 
 import numpy as np
 import psutil
@@ -99,9 +101,9 @@ class RegistroFlujo(BaseModel):
     protocol: Literal["TCP", "UDP", "ICMP", "OTHER", "OTRO"] = Field(default="TCP", alias="protocol")
     duration_ms: float = Field(default=0.0, ge=0, allow_inf_nan=False, alias="duration_ms")
     total_bytes: int = Field(default=0, ge=0, alias="total_bytes")
-    exported_at: Optional[float] = Field(default=None, description="Marca temporal de exportación en el sensor")
-    ttl_avg: Optional[float] = Field(default=None, description="TTL promedio observado en paquetes IP del flujo")
-    ttl_std: Optional[float] = Field(default=None, description="Desviación estándar de TTL en paquetes IP del flujo")
+    exported_at: Optional[float] = Field(default=None, ge=0.0, allow_inf_nan=False, description="Marca temporal de exportación en el sensor")
+    ttl_avg: Optional[float] = Field(default=None, ge=0.0, le=255.0, allow_inf_nan=False, description="TTL promedio observado en paquetes IP del flujo")
+    ttl_std: Optional[float] = Field(default=None, ge=0.0, le=255.0, allow_inf_nan=False, description="Desviación estándar de TTL en paquetes IP del flujo")
     sesion_local_confirmada: Optional[bool] = Field(
         default=None,
         description="Indica si el flujo pertenece a una sesión saliente legítima confirmada por el host local",
@@ -155,16 +157,17 @@ def _sanitizar_celda_csv(valor):
     return valor
 
 
-def registro_a_diccionario(registro: RegistroTrafico, anonimizar: bool = True) -> dict:
+def registro_a_diccionario(registro: RegistroTrafico, anonimizar: Optional[bool] = None) -> dict:
+    anonimizar_ef = configuracion.anonimizar_ips if anonimizar is None else bool(anonimizar)
     es_ataque = bool(registro.is_attack)
     ip_origen = (
         anonimizar_direccion_ip(registro.src_ip)
-        if (anonimizar and not es_ataque)
+        if (anonimizar_ef and not es_ataque)
         else registro.src_ip
     )
     ip_destino = (
         anonimizar_direccion_ip(registro.dst_ip)
-        if anonimizar
+        if anonimizar_ef
         else registro.dst_ip
     )
     return {
@@ -188,46 +191,108 @@ NOMBRE_COOKIE_SESION = "cybershield_session"
 _SALT_PBKDF2 = b"cybershield_pyme_auth_salt_v2"
 _ITERACIONES_PBKDF2 = 120_000
 _intentos_fallidos_login: dict = {}
+_intentos_fallidos_soar: dict = {}
+_bloqueo_auth_rate = threading.Lock()
+_tokens_revocados: dict[str, float] = {}
 MAX_INTENTOS_LOGIN = 5
 VENTANA_BLOQUEO_LOGIN_SEG = 300
 MAX_IPS_LOGIN_RASTREADAS = 1024
 
 
-def _registrar_fallo_login_seguro(ip_cliente: str, ahora: float) -> None:
-    if ip_cliente in _intentos_fallidos_login:
-        activos = [t for t in _intentos_fallidos_login[ip_cliente] if ahora - t < VENTANA_BLOQUEO_LOGIN_SEG]
-        activos.append(ahora)
-        _intentos_fallidos_login[ip_cliente] = activos
-        return
+def _sanitizar_texto_log(valor: str, max_len: int = 80) -> str:
+    limpio = str(valor or "").replace("\r", " ").replace("\n", " ").replace("\t", " ").strip()
+    return limpio[:max_len]
 
-    if len(_intentos_fallidos_login) < MAX_IPS_LOGIN_RASTREADAS:
-        _intentos_fallidos_login[ip_cliente] = [ahora]
-        return
 
-    expiradas = []
-    for ip_k, marcas in list(_intentos_fallidos_login.items()):
-        vigentes = [t for t in marcas if ahora - t < VENTANA_BLOQUEO_LOGIN_SEG]
-        if vigentes:
-            _intentos_fallidos_login[ip_k] = vigentes
+def _es_conexion_https(peticion: Request) -> bool:
+    if peticion.url.scheme == "https":
+        return True
+    proto_fwd = (peticion.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    return proto_fwd == "https"
+
+
+def _verificar_bloqueo_intentos(tabla_intentos: dict, ip_cliente: str, ahora: float) -> Optional[int]:
+    with _bloqueo_auth_rate:
+        intentos = [t for t in tabla_intentos.get(ip_cliente, []) if ahora - t < VENTANA_BLOQUEO_LOGIN_SEG]
+        if intentos:
+            tabla_intentos[ip_cliente] = intentos
         else:
-            expiradas.append(ip_k)
-    for ip_k in expiradas:
-        _intentos_fallidos_login.pop(ip_k, None)
+            tabla_intentos.pop(ip_cliente, None)
+        if len(intentos) >= MAX_INTENTOS_LOGIN:
+            return max(1, int(VENTANA_BLOQUEO_LOGIN_SEG - (ahora - intentos[0])))
+        return None
 
-    if len(_intentos_fallidos_login) < MAX_IPS_LOGIN_RASTREADAS:
-        _intentos_fallidos_login[ip_cliente] = [ahora]
-        return
 
-    candidatas_no_bloqueadas = [
-        ip_k for ip_k, marcas in _intentos_fallidos_login.items() if len(marcas) < MAX_INTENTOS_LOGIN
-    ]
-    if candidatas_no_bloqueadas:
-        ip_desalojar = min(
-            candidatas_no_bloqueadas,
-            key=lambda k: (len(_intentos_fallidos_login[k]), _intentos_fallidos_login[k][-1]),
-        )
-        _intentos_fallidos_login.pop(ip_desalojar, None)
-        _intentos_fallidos_login[ip_cliente] = [ahora]
+def _registrar_fallo_en_tabla(tabla_intentos: dict, ip_cliente: str, ahora: float) -> None:
+    with _bloqueo_auth_rate:
+        if ip_cliente in tabla_intentos:
+            activos = [t for t in tabla_intentos[ip_cliente] if ahora - t < VENTANA_BLOQUEO_LOGIN_SEG]
+            activos.append(ahora)
+            tabla_intentos[ip_cliente] = activos
+            return
+
+        if len(tabla_intentos) < MAX_IPS_LOGIN_RASTREADAS:
+            tabla_intentos[ip_cliente] = [ahora]
+            return
+
+        expiradas = []
+        for ip_k, marcas in list(tabla_intentos.items()):
+            vigentes = [t for t in marcas if ahora - t < VENTANA_BLOQUEO_LOGIN_SEG]
+            if vigentes:
+                tabla_intentos[ip_k] = vigentes
+            else:
+                expiradas.append(ip_k)
+        for ip_k in expiradas:
+            tabla_intentos.pop(ip_k, None)
+
+        if len(tabla_intentos) < MAX_IPS_LOGIN_RASTREADAS:
+            tabla_intentos[ip_cliente] = [ahora]
+            return
+
+        candidatas_no_bloqueadas = [
+            ip_k for ip_k, marcas in tabla_intentos.items() if len(marcas) < MAX_INTENTOS_LOGIN
+        ]
+        if candidatas_no_bloqueadas:
+            ip_desalojar = min(
+                candidatas_no_bloqueadas,
+                key=lambda k: (len(tabla_intentos[k]), tabla_intentos[k][-1]),
+            )
+        else:
+            ip_desalojar = min(tabla_intentos.keys(), key=lambda k: tabla_intentos[k][-1])
+        tabla_intentos.pop(ip_desalojar, None)
+        tabla_intentos[ip_cliente] = [ahora]
+
+
+def _registrar_fallo_login_seguro(ip_cliente: str, ahora: float) -> None:
+    _registrar_fallo_en_tabla(_intentos_fallidos_login, ip_cliente, ahora)
+
+
+def _hash_token_sesion(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _podar_tokens_revocados(ahora: float) -> None:
+    expirados = [h for h, exp in list(_tokens_revocados.items()) if ahora > exp]
+    for h in expirados:
+        _tokens_revocados.pop(h, None)
+
+
+def _revocar_token_sesion(token: Optional[str]) -> Optional[str]:
+    if not token:
+        return None
+    ahora = time.time()
+    token_hash = _hash_token_sesion(token)
+    expiracion = ahora + (configuracion.duracion_sesion_horas * 3600)
+    partes = token.split(":")
+    if len(partes) == 3:
+        try:
+            expiracion = max(ahora, float(int(partes[1])))
+        except ValueError:
+            pass
+    with _bloqueo_auth_rate:
+        _podar_tokens_revocados(ahora)
+        _tokens_revocados[token_hash] = expiracion
+    return token_hash
 
 
 def _crear_token_sesion(usuario: str) -> str:
@@ -241,7 +306,7 @@ def _crear_token_sesion(usuario: str) -> str:
     return f"{mensaje}:{firma}"
 
 
-def _verificar_token_sesion(token: Optional[str]) -> Optional[str]:
+def _verificar_token_sesion_detalle(token: Optional[str]) -> Optional[tuple[str, int, str]]:
     if not token or ":" not in token:
         return None
     partes = token.split(":")
@@ -252,7 +317,8 @@ def _verificar_token_sesion(token: Optional[str]) -> Optional[str]:
         expiracion = int(exp_str)
     except ValueError:
         return None
-    if time.time() > expiracion:
+    ahora = time.time()
+    if ahora > expiracion:
         return None
     mensaje = f"{usuario}:{expiracion}"
     firma_esperada = hmac.new(
@@ -262,10 +328,24 @@ def _verificar_token_sesion(token: Optional[str]) -> Optional[str]:
     ).hexdigest()
     if not hmac.compare_digest(firma_recibida, firma_esperada):
         return None
-    return usuario
+    token_hash = _hash_token_sesion(token)
+    with _bloqueo_auth_rate:
+        exp_rev = _tokens_revocados.get(token_hash)
+        if exp_rev is not None:
+            if ahora <= exp_rev:
+                return None
+            _tokens_revocados.pop(token_hash, None)
+    return usuario, expiracion, token_hash
+
+
+def _verificar_token_sesion(token: Optional[str]) -> Optional[str]:
+    detalle = _verificar_token_sesion_detalle(token)
+    return detalle[0] if detalle is not None else None
 
 
 def _verificar_credenciales_admin(usuario: str, clave: str) -> bool:
+    if not configuracion.clave_admin:
+        return False
     usuario_valido = hmac.compare_digest(usuario.strip(), configuracion.usuario_admin)
     hash_recibido = hashlib.pbkdf2_hmac("sha256", clave.encode("utf-8"), _SALT_PBKDF2, _ITERACIONES_PBKDF2).hex()
     hash_esperado = hashlib.pbkdf2_hmac(
@@ -277,15 +357,50 @@ def _verificar_credenciales_admin(usuario: str, clave: str) -> bool:
 
 def _es_peticion_autenticada(peticion: Request) -> bool:
     token_cookie = peticion.cookies.get(NOMBRE_COOKIE_SESION)
-    if _verificar_token_sesion(token_cookie) is not None:
-        return True
-    x_api_key = peticion.headers.get("x-api-key")
-    if x_api_key and configuracion.clave_api_sensor and hmac.compare_digest(x_api_key, configuracion.clave_api_sensor):
-        return True
-    host_cliente = peticion.client.host if peticion.client else ""
-    if host_cliente == "testclient":
-        return True
-    return False
+    return _verificar_token_sesion(token_cookie) is not None
+
+
+def _construir_origenes_confiables(host_peticion: str) -> set[str]:
+    origenes_validos = {o.rstrip("/") for o in configuracion.origenes_cors if o and o.strip() != "*"}
+    host_limpio = (host_peticion or "").strip()
+    if host_limpio:
+        origenes_validos.add(f"http://{host_limpio}")
+        origenes_validos.add(f"https://{host_limpio}")
+    origenes_validos.update({
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "https://localhost:8000",
+        "https://127.0.0.1:8000",
+    })
+    return origenes_validos
+
+
+def _extraer_origen_referer(referer: Optional[str]) -> Optional[str]:
+    if not referer:
+        return None
+    try:
+        parsed = urlparse(referer)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        pass
+    return None
+
+
+def _validar_origen_csrf(cabeceras, metodo: str) -> bool:
+    sec_fetch_site = (cabeceras.get("sec-fetch-site") or "").strip().lower()
+    if sec_fetch_site == "cross-site":
+        return False
+    host_peticion = cabeceras.get("host", "")
+    origenes_validos = _construir_origenes_confiables(host_peticion)
+    origen = (cabeceras.get("origin") or "").strip().rstrip("/")
+    if origen:
+        return origen in origenes_validos
+    if metodo.upper() in ("POST", "PUT", "DELETE", "PATCH"):
+        referer_origen = _extraer_origen_referer(cabeceras.get("referer"))
+        if referer_origen:
+            return referer_origen.rstrip("/") in origenes_validos
+    return True
 
 
 async def requerir_clave_api_sensor(x_api_key: Optional[str] = Header(default=None)) -> None:
@@ -298,34 +413,14 @@ async def requerir_clave_api_sensor(x_api_key: Optional[str] = Header(default=No
         raise HTTPException(status_code=401, detail="Clave de API inválida o ausente (cabecera X-API-Key)")
 
 
-async def verificar_acceso_operativo(
-    peticion: Request,
-    x_api_key: Optional[str] = Header(default=None),
-) -> None:
-    if x_api_key is not None:
-        if not configuracion.clave_api_sensor or not hmac.compare_digest(x_api_key, configuracion.clave_api_sensor):
-            raise HTTPException(status_code=401, detail="Clave de API inválida")
-        return
-
+async def verificar_acceso_operativo(peticion: Request) -> None:
     if not _es_peticion_autenticada(peticion):
         raise HTTPException(
             status_code=401,
-            detail="Sesión no iniciada. Autentíquese en /frontend/login.html o envíe X-API-Key",
+            detail="Sesión administrativa requerida. Inicie sesión en /frontend/login.html",
         )
-
-    origen = peticion.headers.get("origin")
-    if origen:
-        host_peticion = peticion.headers.get("host", "")
-        origenes_validos = set(configuracion.origenes_cors) | {
-            f"http://{host_peticion}",
-            f"https://{host_peticion}",
-            "http://localhost:8000",
-            "http://127.0.0.1:8000",
-            "https://localhost:8000",
-            "https://127.0.0.1:8000",
-        }
-        if "*" not in configuracion.origenes_cors and origen not in origenes_validos:
-            raise HTTPException(status_code=403, detail="Origen cruzado (CSRF) no autorizado")
+    if not _validar_origen_csrf(peticion.headers, peticion.method):
+        raise HTTPException(status_code=403, detail="Origen cruzado (CSRF) no autorizado")
 
 
 iso_utc = fecha_a_iso_utc
@@ -382,13 +477,16 @@ class EscritorBaseDatos:
     MAXIMO_COLA_PENDIENTES = 10_000
     UMBRAL_RESERVA_ATAQUES = 8_000
     PAUSA_CONTRAPRESION_ATAQUE_SEG = 0.05
+    MAX_ESPERA_CONTRAPRESION_ATAQUE_SEG = 5.0
 
     def __init__(self) -> None:
         self.cola_pendientes: asyncio.Queue = asyncio.Queue(maxsize=self.MAXIMO_COLA_PENDIENTES)
         self.total_errores = 0
         self.filas_descartadas = 0
         self._tarea_escritura: Optional[asyncio.Task] = None
+        self._tarea_vaciado_actual: Optional[asyncio.Task] = None
         self._ejecutor_escritura: Optional[ThreadPoolExecutor] = None
+        self._lote_en_vuelo: Optional[List[dict]] = None
 
     @property
     def queue(self):
@@ -424,20 +522,22 @@ class EscritorBaseDatos:
                     self.filas_descartadas += 1
                     descartadas_lote += 1
             else:
+                limite_espera = time.monotonic() + self.MAX_ESPERA_CONTRAPRESION_ATAQUE_SEG
                 while True:
                     try:
                         self.cola_pendientes.put_nowait(f)
                         break
                     except asyncio.QueueFull:
-                        if self._tarea_escritura is None or self._tarea_escritura.done():
+                        if self._tarea_escritura is None or self._tarea_escritura.done() or time.monotonic() >= limite_espera:
                             lote_emergencia = []
                             while len(lote_emergencia) < self.MAXIMO_FILAS_LOTE and not self.cola_pendientes.empty():
                                 try:
                                     lote_emergencia.append(self.cola_pendientes.get_nowait())
                                 except asyncio.QueueEmpty:
                                     break
-                            if lote_emergencia:
-                                await self._vaciar_lote(lote_emergencia)
+                            lote_emergencia.append(f)
+                            await self._vaciar_lote(lote_emergencia)
+                            break
                         else:
                             await asyncio.sleep(self.PAUSA_CONTRAPRESION_ATAQUE_SEG)
 
@@ -452,7 +552,10 @@ class EscritorBaseDatos:
     submit = encolar
 
     async def _drenar_cola(self) -> List[dict]:
-        lote = [await self.cola_pendientes.get()]
+        lote: List[dict] = []
+        self._lote_en_vuelo = lote
+        primero = await self.cola_pendientes.get()
+        lote.append(primero)
         bucle = asyncio.get_running_loop()
         tiempo_limite = bucle.time() + self.INTERVALO_VACIADO_SEG
         while len(lote) < self.MAXIMO_FILAS_LOTE:
@@ -488,7 +591,15 @@ class EscritorBaseDatos:
     async def _bucle_escritor(self) -> None:
         while True:
             lote = await self._drenar_cola()
-            await self._vaciar_lote(lote)
+            if not lote:
+                continue
+            self._tarea_vaciado_actual = asyncio.create_task(self._vaciar_lote(lote))
+            try:
+                await asyncio.shield(self._tarea_vaciado_actual)
+            finally:
+                if self._tarea_vaciado_actual is not None and self._tarea_vaciado_actual.done():
+                    self._lote_en_vuelo = None
+                    self._tarea_vaciado_actual = None
 
     def iniciar(self) -> None:
         self._asegurar_ejecutor()
@@ -504,6 +615,18 @@ class EscritorBaseDatos:
             except asyncio.CancelledError:
                 pass
             self._tarea_escritura = None
+
+        if self._tarea_vaciado_actual is not None:
+            try:
+                await self._tarea_vaciado_actual
+            except Exception:
+                pass
+            self._tarea_vaciado_actual = None
+            self._lote_en_vuelo = None
+        elif self._lote_en_vuelo:
+            lote_rescate = list(self._lote_en_vuelo)
+            self._lote_en_vuelo = None
+            await self._vaciar_lote(lote_rescate)
 
         pendientes: List[dict] = []
         while not self.cola_pendientes.empty():
@@ -576,11 +699,16 @@ REDES_CDN_CLOUD_CONOCIDAS = (
 )
 
 
+_IP_LOCAL_PRINCIPAL_RUTA: str = ""
+
+
 def _detectar_ips_locales_servidor() -> set[str]:
+    global _IP_LOCAL_PRINCIPAL_RUTA
     ips = {"127.0.0.1"}
     ip_env = (os.getenv("LOCAL_HOST_IP") or "").strip()
     if ip_env:
         ips.add(ip_env)
+        _IP_LOCAL_PRINCIPAL_RUTA = ip_env
     for destino in (("8.8.8.8", 80), ("1.1.1.1", 80)):
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -588,6 +716,8 @@ def _detectar_ips_locales_servidor() -> set[str]:
                 ip_local = s.getsockname()[0]
                 if ip_local and not ip_local.startswith("169.254."):
                     ips.add(ip_local)
+                    if not _IP_LOCAL_PRINCIPAL_RUTA and not ip_local.startswith("127."):
+                        _IP_LOCAL_PRINCIPAL_RUTA = ip_local
         except Exception:
             pass
     try:
@@ -650,7 +780,9 @@ def _es_trafico_cdn_cloud_benigno(r: RegistroFlujo) -> bool:
         and _es_puerto_servicio_cdn_cloud(puerto_origen)
         and _es_puerto_efimero_local(puerto_destino)
     ):
-        return True
+        # Exigir evidencia bidireccional o sesión local confirmada para no eximir floods unidireccionales spoofed/cloud
+        tiene_respuesta_local = len(r.features) > 5 and float(r.features[5]) >= 1.0
+        return bool(r.sesion_local_confirmada or tiene_respuesta_local)
 
     if (
         src_es_local
@@ -775,16 +907,15 @@ class EsquemaUmbralDecision(BaseModel):
 
 def _ip_en_cuarentena_soar_vigente(ip_str: str, ahora_epoch: float) -> Optional[dict]:
     """
-    Verifica en O(1) si la IP origen ya se encuentra aislada en Cuarentena Activa SOAR.
-    Dado que Npcap captura tramas en NDIS (Capa 2) antes de que Windows Filtering Platform (WFP)
-    las descarte en Capa 3, suprimir estos flujos evita falsas re-alertas en el NIDS mientras
-    el Firewall del Sistema Operativo ya está bloqueando al atacante.
+    Verifica en O(1) si la IP origen ya se encuentra aislada REALMENTE en el Firewall del SO.
+    Solo suprime flujos Npcap pre-firewall cuando firewall_os_applied es True, evitando
+    puntos ciegos si netsh falló o si el proceso corre sin elevación.
     """
     if not _modulo_soar_activo or not _cuarentena_activa:
         return None
     ip_limpia = (ip_str or "").strip()
     info_q = _cuarentena_activa.get(ip_limpia)
-    if info_q is None:
+    if info_q is None or not info_q.get("firewall_os_applied"):
         return None
     if info_q.get("is_permanent"):
         return info_q
@@ -795,6 +926,8 @@ def _ip_en_cuarentena_soar_vigente(ip_str: str, ahora_epoch: float) -> Optional[
 
 
 async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, tiempo_recepcion: float) -> List[dict]:
+    if not registros:
+        return []
     if origen == "sensor" and _modulo_soar_activo and _cuarentena_activa:
         ahora_q = time.time()
         registros_activos: List[RegistroFlujo] = []
@@ -815,9 +948,11 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
     try:
         probabilidades, ms_modelo = await motor_inferencia.predecir(matriz_X, ips_origen=ips_origen_lote)
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=f"Modelo Conv1D no disponible: {exc}")
+        registro_logger.error("Error de disponibilidad Conv1D: %s", exc)
+        raise HTTPException(status_code=503, detail="Modelo Conv1D no disponible")
     except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=422, detail=f"Vector de características inválido para inferencia: {exc}")
+        registro_logger.warning("Vector inválido para inferencia Conv1D: %s", exc)
+        raise HTTPException(status_code=422, detail="Vector de características inválido para inferencia")
 
     tiempo_actual = obtener_utc_ingenuo()
     ahora_mono = time.monotonic()
@@ -864,8 +999,8 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
 
             if es_solicitado or es_iniciador_local or es_cdn_cloud_benigno:
                 es_ddos = False
-                if prob > 0.50:
-                    prob = round(0.05 + (prob * 0.10), 4)
+                if prob > umbral_sensor:
+                    etiqueta_estado = "Sesión Saliente / Conntrack Verificado"
             elif prob > umbral_sensor:
                 if total_rafaga_reciente >= MIN_FLUJOS_RAFAGA_DDOS or es_ataque_entrante_lan:
                     es_ddos = True
@@ -902,12 +1037,13 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
         })
 
     marca_iso = fecha_a_iso_utc(tiempo_actual)
+    anonimizar_ws = configuracion.anonimizar_ips
     paquetes_telemetria = [
         {
             **{k: v for k, v in fila.items() if k != "timestamp"},
             **meta_ws,
-            "src_ip": fila["src_ip"] if fila["is_attack"] else anonimizar_direccion_ip(fila["src_ip"]),
-            "dst_ip": anonimizar_direccion_ip(fila["dst_ip"]),
+            "src_ip": fila["src_ip"] if (fila["is_attack"] or not anonimizar_ws) else anonimizar_direccion_ip(fila["src_ip"]),
+            "dst_ip": anonimizar_direccion_ip(fila["dst_ip"]) if anonimizar_ws else fila["dst_ip"],
             "timestamp": marca_iso,
             "exported_at": rec.exported_at,
         }
@@ -919,14 +1055,21 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
     else:
         ataques = [p for p in paquetes_telemetria if p["is_attack"]]
         picos_inusuales = [p for p in paquetes_telemetria if p.get("is_unusual_peak")]
-        ddos_por_protocolo = {"TCP": 0, "UDP": 0, "ICMP": 0}
+        ddos_por_protocolo = {"TCP": 0, "UDP": 0, "ICMP": 0, "OTHER": 0}
         for p_atq in ataques:
-            proto_atq = str(p_atq.get("protocol") or "TCP").upper()
+            proto_atq = str(p_atq.get("protocol") or "OTHER").upper()
+            if proto_atq == "OTRO":
+                proto_atq = "OTHER"
             if proto_atq in ddos_por_protocolo:
                 ddos_por_protocolo[proto_atq] += 1
             else:
-                ddos_por_protocolo["TCP"] += 1
+                ddos_por_protocolo["OTHER"] += 1
 
+        confianza_promedio_lote = round(
+            sum(float(p.get("confidence_percentage") or 0.0) for p in paquetes_telemetria)
+            / max(1, len(paquetes_telemetria)),
+            2,
+        )
         muestra = (
             ataques[: configuracion.ws_max_flows_per_message]
             or picos_inusuales[: configuracion.ws_max_flows_per_message]
@@ -938,6 +1081,7 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
             "total": len(paquetes_telemetria),
             "ddos": len(ataques),
             "benign": len(paquetes_telemetria) - len(ataques),
+            "avg_confidence": confianza_promedio_lote,
             "ddos_by_protocol": ddos_por_protocolo,
             "unusual_peaks": len(picos_inusuales),
             "unusual_label": picos_inusuales[0]["status_label"] if picos_inusuales else None,
@@ -951,7 +1095,7 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
     seg_actual = int(tiempo_muro)
     cubeta_seg = _historial_segundos_throughput.get(seg_actual)
     if cubeta_seg is None:
-        cubeta_seg = {"benign": 0, "TCP": 0, "UDP": 0, "ICMP": 0}
+        cubeta_seg = {"benign": 0, "TCP": 0, "UDP": 0, "ICMP": 0, "OTHER": 0}
         _historial_segundos_throughput[seg_actual] = cubeta_seg
         if len(_historial_segundos_throughput) > 180:
             corte_seg = seg_actual - 150
@@ -960,11 +1104,11 @@ async def procesar_registros_flujo(registros: List[RegistroFlujo], origen: str, 
 
     for f_bd in filas_bd:
         if f_bd["is_attack"]:
-            p_up = str(f_bd.get("protocol") or "TCP").upper()
+            p_up = str(f_bd.get("protocol") or "OTHER").upper()
             if p_up in ("TCP", "UDP", "ICMP"):
                 cubeta_seg[p_up] += 1
             else:
-                cubeta_seg["TCP"] += 1
+                cubeta_seg["OTHER"] = cubeta_seg.get("OTHER", 0) + 1
         else:
             cubeta_seg["benign"] += 1
 
@@ -1044,98 +1188,17 @@ def _reconstruir_agregados_minuto() -> None:
         registro_logger.info("Agregados por minuto reconstruidos exitosamente: %d intervalos", len(acumulado))
 
 
-def _restaurar_alertas_historicas() -> None:
-    with SesionLocal() as db:
-        db.execute(delete(RegistroTrafico).where(RegistroTrafico.protocol.notin_(("TCP", "UDP", "ICMP"))))
-        db.commit()
-
-        total_ddos_stats = db.query(func.coalesce(func.sum(EstadisticaMinutoTrafico.ddos), 0)).scalar() or 0
-        total_ddos_logs = db.query(func.count(RegistroTrafico.id)).filter(RegistroTrafico.is_attack.is_(True)).scalar() or 0
-        if total_ddos_stats <= total_ddos_logs:
-            return
-
-        minuto_expr = (
-            func.strftime("%Y-%m-%d %H:%M:00", RegistroTrafico.timestamp)
-            if ES_SQLITE
-            else func.date_trunc("minute", RegistroTrafico.timestamp)
-        )
-        existentes_por_minuto = {
-            (
-                datetime.strptime(b, "%Y-%m-%d %H:%M:%S") if isinstance(b, str) else b,
-                src or "sensor",
-            ): int(cnt)
-            for b, src, cnt in db.query(
-                minuto_expr.label("b"),
-                RegistroTrafico.source,
-                func.count(RegistroTrafico.id),
-            )
-            .filter(RegistroTrafico.is_attack.is_(True))
-            .group_by("b", RegistroTrafico.source)
-            .all()
-        }
-
-        buckets_ddos = (
-            db.query(
-                EstadisticaMinutoTrafico.bucket,
-                EstadisticaMinutoTrafico.source,
-                EstadisticaMinutoTrafico.ddos,
-            )
-            .filter(EstadisticaMinutoTrafico.ddos > 0)
-            .order_by(EstadisticaMinutoTrafico.bucket.asc())
-            .all()
-        )
-
-        protocolos_ciclo = ("ICMP", "UDP", "TCP")
-        filas_restaurar = []
-        contador_proto = 0
-
-        for bucket_dt, origen, cant_ddos in buckets_ddos:
-            clave = (bucket_dt, origen or "sensor")
-            actuales = existentes_por_minuto.get(clave, 0)
-            faltantes = int(cant_ddos or 0) - actuales
-            if faltantes <= 0:
-                continue
-
-            es_sim = origen == "simulation"
-            for i in range(faltantes):
-                proto = protocolos_ciclo[contador_proto % 3]
-                contador_proto += 1
-                seg_offset = (i * 55) // max(1, faltantes)
-                conf = 99.6 if (contador_proto % 5 != 0) else (91.4 if contador_proto % 2 == 0 else 83.5)
-                filas_restaurar.append({
-                    "timestamp": bucket_dt + timedelta(seconds=seg_offset),
-                    "src_ip": f"203.0.113.{20 + (contador_proto % 180)}" if es_sim else f"192.168.18.{15 + (contador_proto % 10)}",
-                    "dst_ip": "198.51.100.5" if es_sim else "192.168.18.10",
-                    "protocol": proto,
-                    "duration_ms": 210.5,
-                    "total_bytes": 46800,
-                    "prediction": "DDoS",
-                    "is_attack": True,
-                    "probability": round(conf / 100.0, 4),
-                    "confidence_percentage": conf,
-                    "source": origen or "sensor",
-                })
-
-        if filas_restaurar:
-            for i in range(0, len(filas_restaurar), 500):
-                db.execute(insert(RegistroTrafico), filas_restaurar[i : i + 500])
-            db.commit()
-            registro_logger.info("Historial de alertas restaurado exitosamente: %d alertas recuperadas", len(filas_restaurar))
-
-
 def _purgar_registros_antiguos() -> int:
     punto_corte = obtener_utc_ingenuo() - timedelta(days=configuracion.dias_retencion)
     eliminados = 0
     lote_borrado = 2000
     with SesionLocal() as db:
+        # 1. Purga por antigüedad (RETENTION_DAYS): aplica a todos los registros, incluidos ataques vencidos
         if configuracion.dias_retencion > 0:
             while True:
                 subconsulta_ids = (
                     select(RegistroTrafico.id)
-                    .where(
-                        RegistroTrafico.timestamp < punto_corte,
-                        RegistroTrafico.is_attack.is_(False),
-                    )
+                    .where(RegistroTrafico.timestamp < punto_corte)
                     .limit(lote_borrado)
                     .scalar_subquery()
                 )
@@ -1146,31 +1209,32 @@ def _purgar_registros_antiguos() -> int:
                     break
                 time.sleep(0.05)
 
+        # 2. Tope por conteo real de filas (MAX_DB_LOG_ROWS), nunca por diferencia max_id - max_filas
         max_filas = getattr(configuracion, "max_filas_historial_bd", 50000)
         if max_filas > 0:
-            max_id = db.query(func.max(RegistroTrafico.id)).scalar() or 0
-            umbral_id = max_id - max_filas
-            if umbral_id > 0:
-                while True:
-                    sub_exceso = (
-                        select(RegistroTrafico.id)
-                        .where(
-                            RegistroTrafico.id <= umbral_id,
-                            RegistroTrafico.is_attack.is_(False),
-                        )
-                        .limit(lote_borrado)
-                        .scalar_subquery()
-                    )
-                    n_exc = db.execute(delete(RegistroTrafico).where(RegistroTrafico.id.in_(sub_exceso))).rowcount or 0
-                    db.commit()
-                    eliminados += n_exc
-                    if n_exc < lote_borrado:
-                        break
-                    time.sleep(0.05)
+            total_filas = int(db.query(func.count(RegistroTrafico.id)).scalar() or 0)
+            exceso = total_filas - max_filas
+            if exceso > 0:
+                # Priorizar recorte de benignos antiguos antes de recortar alertas antiguas si persiste exceso
+                for solo_benignos in (True, False):
+                    while exceso > 0:
+                        paso = min(lote_borrado, exceso)
+                        q_sub = select(RegistroTrafico.id)
+                        if solo_benignos:
+                            q_sub = q_sub.where(RegistroTrafico.is_attack.is_(False))
+                        sub_exceso = q_sub.order_by(RegistroTrafico.id.asc()).limit(paso).scalar_subquery()
+                        n_exc = db.execute(delete(RegistroTrafico).where(RegistroTrafico.id.in_(sub_exceso))).rowcount or 0
+                        db.commit()
+                        eliminados += n_exc
+                        exceso -= n_exc
+                        if n_exc < paso:
+                            break
+                        time.sleep(0.05)
 
+        dias_agregados = max(400, int(configuracion.dias_retencion or 0))
         db.execute(
             delete(EstadisticaMinutoTrafico).where(
-                EstadisticaMinutoTrafico.bucket < obtener_utc_ingenuo() - timedelta(days=400)
+                EstadisticaMinutoTrafico.bucket < obtener_utc_ingenuo() - timedelta(days=dias_agregados)
             )
         )
         db.commit()
@@ -1209,7 +1273,6 @@ async def bucle_politica_retencion() -> None:
 async def ciclo_vida_servidor(aplicacion_fastapi: FastAPI):
     await run_in_threadpool(asegurar_esquema)
     await run_in_threadpool(_reconstruir_agregados_minuto)
-    await run_in_threadpool(_restaurar_alertas_historicas)
     await run_in_threadpool(motor_inferencia.cargar)
     _proceso_sistema.cpu_percent(None)
     psutil.cpu_percent(None)
@@ -1218,7 +1281,13 @@ async def ciclo_vida_servidor(aplicacion_fastapi: FastAPI):
     tarea_retencion = asyncio.create_task(bucle_politica_retencion(), name="tarea-retencion-datos")
 
     if not configuracion.clave_api_sensor:
-        registro_logger.warning("SENSOR_API_KEY no configurado: endpoints de ingesta sin autenticación")
+        registro_logger.warning("SENSOR_API_KEY no configurado: ingesta /api/predict* rechazada (Fail-Closed 503)")
+    if not configuracion.clave_admin:
+        registro_logger.warning("ADMIN_PASSWORD no configurado: inicio de sesión administrativo bloqueado (Fail-Closed)")
+    if configuracion.clave_sesion_efimera:
+        registro_logger.warning("SESSION_SECRET_KEY no configurada en .env: usando clave efímera aleatoria en memoria")
+    if not configuracion.clave_maestra_soar:
+        registro_logger.warning("SOAR_MASTER_PASSWORD no configurada: activación del módulo SOAR bloqueada (Fail-Closed 503)")
     if configuracion.permitir_simulacion:
         registro_logger.warning("ENABLE_SIMULATION=true: endpoints de simulación activos (desactivar en producción)")
 
@@ -1246,12 +1315,16 @@ aplicacion = FastAPI(
 
 app = aplicacion
 
+_origenes_cors_seguros = [o for o in configuracion.origenes_cors if o and o.strip() != "*"]
+if not _origenes_cors_seguros:
+    _origenes_cors_seguros = ["http://localhost:8000", "http://127.0.0.1:8000"]
+
 aplicacion.add_middleware(
     CORSMiddleware,
-    allow_origins=configuracion.origenes_cors,
+    allow_origins=_origenes_cors_seguros,
     allow_credentials=False,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type", "X-API-Key"],
+    allow_headers=["Content-Type", "X-API-Key", "X-EDL-Token"],
 )
 
 
@@ -1262,27 +1335,69 @@ RUTAS_PUBLICAS_EXACTAS = {
     "/api/auth/logout",
     "/api/predict",
     "/api/predict/batch",
+    "/api/soar/blocklist.txt",
     "/frontend/login.html",
     "/favicon.ico",
 }
+
+CSP_POLITICA_SEGURA = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
+    "font-src 'self' https://cdn.jsdelivr.net https://fonts.gstatic.com data:; "
+    "img-src 'self' data:; "
+    "media-src 'self' blob: data:; "
+    "connect-src 'self' ws: wss:; "
+    "frame-ancestors 'none'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'"
+)
+
+
+REDES_PRIVADAS_EDL_PERMITIDAS = (
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+)
+
+
+def _es_acceso_edl_autorizado(peticion: Request) -> bool:
+    if _es_peticion_autenticada(peticion):
+        return True
+    if configuracion.token_edl:
+        token_req = (peticion.headers.get("x-edl-token") or peticion.query_params.get("token") or "").strip()
+        return bool(token_req and hmac.compare_digest(token_req, configuracion.token_edl))
+    host_cliente = (peticion.client.host if peticion.client else "").strip()
+    try:
+        ip_obj = ipaddress.ip_address(host_cliente)
+        if ip_obj.version == 6 and ip_obj.ipv4_mapped is not None:
+            ip_obj = ip_obj.ipv4_mapped
+        return any(ip_obj in red for red in REDES_PRIVADAS_EDL_PERMITIDAS)
+    except ValueError:
+        return False
 
 
 @aplicacion.middleware("http")
 async def cabeceras_seguridad(peticion: Request, siguiente_llamada):
     ruta = peticion.url.path
+    ruta_lower = ruta.lower()
     metodo = peticion.method.upper()
 
-    if metodo != "OPTIONS" and ruta not in RUTAS_PUBLICAS_EXACTAS:
-        es_activo_login = ruta.startswith(("/frontend/css/", "/frontend/img/"))
+    if metodo != "OPTIONS" and ruta_lower not in RUTAS_PUBLICAS_EXACTAS:
+        es_activo_login = ruta_lower.startswith(("/frontend/css/", "/frontend/img/"))
         if not es_activo_login and not _es_peticion_autenticada(peticion):
-            if ruta.startswith("/frontend") or ruta in ("/docs", "/redoc"):
+            if ruta_lower.startswith("/frontend") or ruta_lower in ("/docs", "/redoc"):
                 return RedirectResponse(url="/frontend/login.html", status_code=302)
-            if ruta.startswith("/api/") or ruta == "/openapi.json":
+            if ruta_lower.startswith("/api/") or ruta_lower == "/openapi.json":
                 return JSONResponse(
                     status_code=401,
                     content={"detail": "No autenticado. Inicie sesión en /frontend/login.html"},
                 )
-        if ruta == "/frontend/soar.html" and not _modulo_soar_activo:
+        if ruta_lower == "/frontend/soar.html" and not _modulo_soar_activo:
             return RedirectResponse(url="/frontend/configuracion.html", status_code=302)
 
     respuesta = await siguiente_llamada(peticion)
@@ -1290,10 +1405,10 @@ async def cabeceras_seguridad(peticion: Request, siguiente_llamada):
     respuesta.headers.setdefault("X-Frame-Options", "DENY")
     respuesta.headers.setdefault("Referrer-Policy", "no-referrer")
     respuesta.headers.setdefault("X-XSS-Protection", "1; mode=block")
-    respuesta.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'; object-src 'none'; base-uri 'self'")
-    if peticion.url.scheme == "https":
+    respuesta.headers.setdefault("Content-Security-Policy", CSP_POLITICA_SEGURA)
+    if _es_conexion_https(peticion):
         respuesta.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
-    if ruta.endswith(".html") or ruta.endswith("/") or "/frontend" in ruta:
+    if ruta_lower.endswith(".html") or ruta_lower.endswith("/") or "/frontend" in ruta_lower:
         respuesta.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         respuesta.headers["Pragma"] = "no-cache"
         respuesta.headers["Expires"] = "0"
@@ -1309,33 +1424,45 @@ class SolicitudLogin(BaseModel):
     password: Optional[str] = Field(default=None, min_length=1, max_length=128)
 
 
+_bloqueo_login_async = asyncio.Lock()
+
+
 @aplicacion.post("/api/auth/login")
 async def iniciar_sesion_panel(credenciales: SolicitudLogin, peticion: Request):
+    if not configuracion.clave_admin:
+        raise HTTPException(
+            status_code=503,
+            detail="Servidor sin ADMIN_PASSWORD configurada en .env (modo Fail-Closed activo)",
+        )
     nombre_usuario = (credenciales.usuario or credenciales.username or "").strip()
     clave_acceso = credenciales.contrasena or credenciales.password or ""
     if not nombre_usuario or not clave_acceso:
         raise HTTPException(status_code=422, detail="Debe proporcionar usuario y contraseña")
 
     ip_cliente = peticion.client.host if peticion.client else "desconocido"
-    ahora = time.time()
+    async with _bloqueo_login_async:
+        ahora = time.time()
+        segundos_restantes = _verificar_bloqueo_intentos(_intentos_fallidos_login, ip_cliente, ahora)
+        if segundos_restantes is not None:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Demasiados intentos fallidos. Cuenta bloqueada temporalmente por {segundos_restantes}s.",
+            )
 
-    intentos = [t for t in _intentos_fallidos_login.get(ip_cliente, []) if ahora - t < VENTANA_BLOQUEO_LOGIN_SEG]
-    if len(intentos) >= MAX_INTENTOS_LOGIN:
-        segundos_restantes = int(VENTANA_BLOQUEO_LOGIN_SEG - (ahora - intentos[0]))
-        raise HTTPException(
-            status_code=429,
-            detail=f"Demasiados intentos fallidos. Cuenta bloqueada temporalmente por {segundos_restantes}s.",
-        )
+        es_valido = await run_in_threadpool(_verificar_credenciales_admin, nombre_usuario, clave_acceso)
+        if not es_valido:
+            _registrar_fallo_login_seguro(ip_cliente, time.time())
+            registro_logger.warning(
+                "Intento de login fallido desde IP %s para usuario '%s'",
+                _sanitizar_texto_log(ip_cliente, 45),
+                _sanitizar_texto_log(nombre_usuario, 64),
+            )
+            raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
 
-    es_valido = await run_in_threadpool(_verificar_credenciales_admin, nombre_usuario, clave_acceso)
-    if not es_valido:
-        _registrar_fallo_login_seguro(ip_cliente, ahora)
-        registro_logger.warning("Intento de login fallido desde IP %s para usuario '%s'", ip_cliente, nombre_usuario)
-        raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
+        with _bloqueo_auth_rate:
+            _intentos_fallidos_login.pop(ip_cliente, None)
 
-    _intentos_fallidos_login.pop(ip_cliente, None)
     token_sesion = _crear_token_sesion(nombre_usuario)
-
     respuesta = JSONResponse(
         status_code=200,
         content={"status": "authenticated", "usuario": nombre_usuario, "username": nombre_usuario},
@@ -1346,18 +1473,19 @@ async def iniciar_sesion_panel(credenciales: SolicitudLogin, peticion: Request):
         max_age=configuracion.duracion_sesion_horas * 3600,
         httponly=True,
         samesite="lax",
-        secure=(peticion.url.scheme == "https"),
+        secure=_es_conexion_https(peticion),
         path="/",
     )
     return respuesta
 
 
-@aplicacion.api_route("/api/auth/logout", methods=["GET", "POST"])
-def cerrar_sesion_panel(peticion: Request):
-    if peticion.method == "GET":
-        respuesta = RedirectResponse(url="/frontend/login.html", status_code=302)
-    else:
-        respuesta = JSONResponse(status_code=200, content={"status": "logged_out"})
+@aplicacion.post("/api/auth/logout")
+async def cerrar_sesion_panel(peticion: Request):
+    token_actual = peticion.cookies.get(NOMBRE_COOKIE_SESION)
+    token_hash = _revocar_token_sesion(token_actual)
+    if token_hash:
+        await gestor_conexiones.cerrar_por_sesion(token_hash, code=1008)
+    respuesta = JSONResponse(status_code=200, content={"status": "logged_out"})
     respuesta.delete_cookie(key=NOMBRE_COOKIE_SESION, path="/")
     return respuesta
 
@@ -1365,11 +1493,13 @@ def cerrar_sesion_panel(peticion: Request):
 @aplicacion.get("/api/auth/me")
 def estado_sesion_actual(peticion: Request):
     usuario = _verificar_token_sesion(peticion.cookies.get(NOMBRE_COOKIE_SESION))
-    if not usuario and (peticion.client and peticion.client.host == "testclient"):
-        usuario = configuracion.admin_user
     if not usuario:
         raise HTTPException(status_code=401, detail="Sesión no activa")
-    return {"authenticated": True, "username": usuario}
+    return {
+        "authenticated": True,
+        "username": usuario,
+        "simulation_enabled": configuracion.permitir_simulacion,
+    }
 
 
 @aplicacion.exception_handler(Exception)
@@ -1402,7 +1532,7 @@ def estado_salud():
         "status": "online" if esta_operativo else "degraded",
         "model_loaded": motor_inferencia.listo,
         "database": base_datos_operativa,
-        "model_error": motor_inferencia.error,
+        "model_error": "Modelo no disponible" if motor_inferencia.error else None,
         "active_websockets": len(gestor_conexiones.activas),
     }
     return JSONResponse(status_code=200 if esta_operativo else 503, content=cuerpo)
@@ -1414,7 +1544,7 @@ def metadatos_modelo():
     return {
         "ready": motor_inferencia.listo,
         "n_features": motor_inferencia.total_caracteristicas_modelo,
-        "decision_threshold": configuracion.umbral_decision,
+        "decision_threshold": _umbral_decision_activo,
         "scaler": md.get("scaler"),
         "smote": md.get("smote"),
         "trained_at": md.get("trained_at"),
@@ -1475,7 +1605,10 @@ async def generar_audio_tts(
     pitch: Optional[float] = Query(default=1.0),
     rate: Optional[float] = Query(default=1.0),
 ):
-    modelo_voz = MAPA_VOCES_NEURALES.get(voice, "es-PE-AlexNeural")
+    voice_limpia = (voice or "").strip()
+    if voice_limpia not in MAPA_VOCES_NEURALES:
+        raise HTTPException(status_code=422, detail="Perfil de voz no permitido")
+    modelo_voz = MAPA_VOCES_NEURALES[voice_limpia]
     texto_limpio = text.strip()
     if not texto_limpio:
         texto_limpio = "Peligro. El sistema está sufriendo un ataque."
@@ -1490,13 +1623,15 @@ async def generar_audio_tts(
     rate_pct = int(round((val_rate - 1.0) * 100))
     rate_arg = f"{rate_pct:+d}%"
 
-    dir_audio = os.path.join(configuracion.directorio_frontend, "audio")
+    dir_audio = os.path.realpath(os.path.join(configuracion.directorio_frontend, "audio"))
     os.makedirs(dir_audio, exist_ok=True)
 
     texto_min = texto_limpio.lower()
     menciona_protocolo = any(p in texto_min for p in ("tcp", "udp", "icmp", "protocolo"))
     es_estandar = texto_min.startswith("peligro") and "ataque" in texto_min and not menciona_protocolo
-    archivo_estudio = os.path.join(dir_audio, f"{voice}.mp3")
+    archivo_estudio = os.path.realpath(os.path.join(dir_audio, f"{voice_limpia}.mp3"))
+    if not archivo_estudio.startswith(dir_audio + os.sep):
+        raise HTTPException(status_code=400, detail="Ruta de audio fuera de directorio permitido")
     if es_estandar and pitch_arg == "+0Hz" and rate_arg == "+0%" and os.path.exists(archivo_estudio):
         return FileResponse(archivo_estudio, media_type="audio/mpeg", headers={"Cache-Control": "public, max-age=86400"})
 
@@ -1667,7 +1802,8 @@ async def simular_flujo_directo(
             try:
                 _muestras_simulacion.update(await run_in_threadpool(_cargar_muestras_simulacion))
             except Exception as exc:
-                raise HTTPException(status_code=503, detail=f"No se pudieron cargar muestras de simulación: {exc}")
+                registro_logger.error("Error cargando muestras de simulación: %s", exc)
+                raise HTTPException(status_code=503, detail="No se pudieron cargar muestras de simulación")
 
     grupo = _muestras_simulacion[traffic_type]
     if len(grupo) == 0:
@@ -1700,21 +1836,35 @@ async def simular_flujo_directo(
 @aplicacion.websocket("/ws/traffic")
 async def punto_conexion_websocket(websocket: WebSocket):
     token_cookie = websocket.cookies.get(NOMBRE_COOKIE_SESION)
-    x_api_key = websocket.headers.get("x-api-key")
-    host_cliente = websocket.client.host if websocket.client else ""
-    autenticado = (
-        _verificar_token_sesion(token_cookie) is not None
-        or (x_api_key and configuracion.clave_api_sensor and hmac.compare_digest(x_api_key, configuracion.clave_api_sensor))
-        or host_cliente == "testclient"
-    )
-    if not autenticado:
+    detalle_sesion = _verificar_token_sesion_detalle(token_cookie)
+    if detalle_sesion is None:
         await websocket.close(code=1008)
         return
 
-    await gestor_conexiones.conectar(websocket)
+    origen_ws = (websocket.headers.get("origin") or "").strip().rstrip("/")
+    if origen_ws:
+        host_ws = websocket.headers.get("host", "")
+        if origen_ws not in _construir_origenes_confiables(host_ws):
+            await websocket.close(code=1008)
+            return
+
+    _usuario, exp_sesion, token_hash = detalle_sesion
+    aceptado = await gestor_conexiones.conectar(websocket, token_hash=token_hash, expiracion=float(exp_sesion))
+    if not aceptado:
+        return
+
     try:
         while True:
-            await websocket.receive_text()
+            try:
+                mensaje_txt = await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
+                if len(mensaje_txt) > 4096:
+                    await websocket.close(code=1009)
+                    break
+            except asyncio.TimeoutError:
+                pass
+            if _verificar_token_sesion(token_cookie) is None:
+                await websocket.close(code=1008)
+                break
     except WebSocketDisconnect:
         pass
     finally:
@@ -1757,13 +1907,15 @@ def obtener_estadisticas_dashboard(db: Session = Depends(obtener_bd)):
         .group_by(RegistroTrafico.protocol)
         .all()
     )
-    ddos_por_proto = {"TCP": 0, "UDP": 0, "ICMP": 0}
+    ddos_por_proto = {"TCP": 0, "UDP": 0, "ICMP": 0, "OTHER": 0}
     for proto_nom, cant in conteo_proto_ddos:
-        clave_p = str(proto_nom or "TCP").upper()
+        clave_p = str(proto_nom or "OTHER").upper()
+        if clave_p == "OTRO":
+            clave_p = "OTHER"
         if clave_p in ddos_por_proto:
             ddos_por_proto[clave_p] += int(cant or 0)
         else:
-            ddos_por_proto["TCP"] += int(cant or 0)
+            ddos_por_proto["OTHER"] += int(cant or 0)
 
     return {
         "total": total,
@@ -1789,6 +1941,7 @@ def obtener_serie_temporal_throughput(seconds: int = Query(90, ge=10, le=120)):
             "tcp": cubeta["TCP"] if cubeta else 0,
             "udp": cubeta["UDP"] if cubeta else 0,
             "icmp": cubeta["ICMP"] if cubeta else 0,
+            "other": cubeta.get("OTHER", 0) if cubeta else 0,
         })
     return {"seconds": seconds, "points": puntos}
 
@@ -1812,6 +1965,8 @@ def obtener_alertas_filtradas(
 ):
     c = RegistroTrafico.confidence_percentage
     fecha_desde = _calcular_inicio_periodo(period)
+    proto_norm = (protocol or "all").strip().upper()
+    source_norm = (source or "all").strip().lower()
 
     ataques = db.query(RegistroTrafico).filter(RegistroTrafico.is_attack.is_(True))
     consulta_kpis = db.query(
@@ -1825,12 +1980,12 @@ def obtener_alertas_filtradas(
         ataques = ataques.filter(RegistroTrafico.timestamp >= fecha_desde)
         consulta_kpis = consulta_kpis.filter(RegistroTrafico.timestamp >= fecha_desde)
 
-    if protocol != "all":
-        ataques = ataques.filter(RegistroTrafico.protocol == protocol)
-        consulta_kpis = consulta_kpis.filter(RegistroTrafico.protocol == protocol)
-    if source != "all":
-        ataques = ataques.filter(RegistroTrafico.source == source)
-        consulta_kpis = consulta_kpis.filter(RegistroTrafico.source == source)
+    if proto_norm != "ALL":
+        ataques = ataques.filter(RegistroTrafico.protocol == proto_norm)
+        consulta_kpis = consulta_kpis.filter(RegistroTrafico.protocol == proto_norm)
+    if source_norm != "all":
+        ataques = ataques.filter(RegistroTrafico.source == source_norm)
+        consulta_kpis = consulta_kpis.filter(RegistroTrafico.source == source_norm)
 
     kpis = consulta_kpis.one()
 
@@ -2003,14 +2158,17 @@ def obtener_distribucion_protocolos(
         RegistroTrafico.protocol.in_(("TCP", "UDP", "ICMP"))
     )
     fecha_desde = _calcular_inicio_periodo(period)
+    proto_norm = (protocol or "all").strip().upper()
+    pred_norm = (prediction or "all").strip().upper()
+    source_norm = (source or "all").strip().lower()
     if fecha_desde is not None:
         consulta = consulta.filter(RegistroTrafico.timestamp >= fecha_desde)
-    if protocol != "all":
-        consulta = consulta.filter(RegistroTrafico.protocol == protocol)
-    if prediction in ("DDoS", "BENIGN"):
-        consulta = consulta.filter(RegistroTrafico.prediction == prediction)
-    if source != "all":
-        consulta = consulta.filter(RegistroTrafico.source == source)
+    if proto_norm != "ALL":
+        consulta = consulta.filter(RegistroTrafico.protocol == proto_norm)
+    if pred_norm in ("DDOS", "BENIGN"):
+        consulta = consulta.filter(RegistroTrafico.prediction == ("DDoS" if pred_norm == "DDOS" else "BENIGN"))
+    if source_norm != "all":
+        consulta = consulta.filter(RegistroTrafico.source == source_norm)
 
     resultados = consulta.group_by(RegistroTrafico.protocol).all()
     return {"labels": [r[0] for r in resultados], "counts": [r[1] for r in resultados], "period": period}
@@ -2028,14 +2186,16 @@ def obtener_flujos_analizados(
 ):
     consulta = db.query(RegistroTrafico).filter(RegistroTrafico.protocol.in_(("TCP", "UDP", "ICMP")))
     fecha_desde = _calcular_inicio_periodo(period)
+    proto_norm = (protocol or "all").strip().upper()
+    source_norm = (source or "all").strip().lower()
     if fecha_desde is not None:
         consulta = consulta.filter(RegistroTrafico.timestamp >= fecha_desde)
-    if protocol != "all":
-        consulta = consulta.filter(RegistroTrafico.protocol == protocol)
+    if proto_norm != "ALL":
+        consulta = consulta.filter(RegistroTrafico.protocol == proto_norm)
     if prediction != "all":
         consulta = consulta.filter(RegistroTrafico.prediction == prediction)
-    if source != "all":
-        consulta = consulta.filter(RegistroTrafico.source == source)
+    if source_norm != "all":
+        consulta = consulta.filter(RegistroTrafico.source == source_norm)
 
     total_registros = consulta.count()
     resultados = (
@@ -2056,19 +2216,25 @@ def obtener_flujos_analizados(
 # --- Exportación e Importación Forense CSV ---
 @aplicacion.get("/api/export/csv")
 def exportar_flujos_csv(
-    anonymize: bool = True,
+    peticion: Request,
+    anonymize: Optional[bool] = None,
     limit: int = Query(5000, ge=1, le=200000),
     period: str = Query("all", max_length=16),
     protocol: str = Query("all", max_length=10),
     prediction: str = Query("all", max_length=16),
+    severity: str = Query("all", max_length=20),
+    search_ip: str = Query("", max_length=45),
     source: str = Query("all", max_length=16),
-    x_api_key: Optional[str] = Header(default=None),
 ):
-    clave_autorizada = bool(
-        x_api_key and configuracion.clave_api_sensor and hmac.compare_digest(x_api_key, configuracion.clave_api_sensor)
-    )
-    anonimizar_efectivo = True if not clave_autorizada else anonymize
+    sesion_admin = _es_peticion_autenticada(peticion)
+    anonimizar_solicitado = configuracion.anonimizar_ips if anonymize is None else bool(anonymize)
+    anonimizar_efectivo = True if not sesion_admin else anonimizar_solicitado
     fecha_desde = _calcular_inicio_periodo(period)
+    proto_norm = (protocol or "all").strip().upper()
+    pred_norm = (prediction or "all").strip().upper()
+    source_norm = (source or "all").strip().lower()
+    sev_norm = (severity or "all").strip().lower().replace("í", "i")
+    search_ip_limpia = (search_ip or "").strip()
 
     def iterador_filas():
         bufer = io.StringIO()
@@ -2077,14 +2243,24 @@ def exportar_flujos_csv(
                            "Prediccion", "Es_Ataque", "Probabilidad", "Confianza_%", "Origen"])
         with SesionLocal() as db:
             q = db.query(RegistroTrafico)
+            c = RegistroTrafico.confidence_percentage
             if fecha_desde is not None:
                 q = q.filter(RegistroTrafico.timestamp >= fecha_desde)
-            if protocol != "all":
-                q = q.filter(RegistroTrafico.protocol == protocol)
-            if prediction in ("DDoS", "BENIGN"):
-                q = q.filter(RegistroTrafico.prediction == prediction)
-            if source != "all":
-                q = q.filter(RegistroTrafico.source == source)
+            if proto_norm != "ALL":
+                q = q.filter(RegistroTrafico.protocol == proto_norm)
+            if pred_norm in ("DDOS", "BENIGN"):
+                q = q.filter(RegistroTrafico.prediction == ("DDoS" if pred_norm == "DDOS" else "BENIGN"))
+            if source_norm != "all":
+                q = q.filter(RegistroTrafico.source == source_norm)
+            if search_ip_limpia:
+                ip_esc = search_ip_limpia.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                q = q.filter(RegistroTrafico.src_ip.like(f"{ip_esc}%", escape="\\"))
+            if sev_norm in ("critical", "critica"):
+                q = q.filter(c >= 95.0)
+            elif sev_norm in ("high", "alta"):
+                q = q.filter(c >= 85.0, c < 95.0)
+            elif sev_norm in ("medium", "media"):
+                q = q.filter(c < 85.0)
             for reg in q.order_by(RegistroTrafico.id.desc()).limit(limit).yield_per(1000):
                 ip_orig = anonimizar_direccion_ip(reg.src_ip) if anonimizar_efectivo else reg.src_ip
                 ip_dest = anonimizar_direccion_ip(reg.dst_ip) if anonimizar_efectivo else reg.dst_ip
@@ -2130,6 +2306,8 @@ def _parsear_csv_validacion_pasiva(contenido_bytes: bytes) -> List[RegistroFlujo
     idx_origen = next((mapa_idx[k] for k in ("source ip", "src_ip", "srcip") if k in mapa_idx), None)
     idx_destino = next((mapa_idx[k] for k in ("destination ip", "dst_ip", "dstip") if k in mapa_idx), None)
     idx_proto = next((mapa_idx[k] for k in ("protocol", "proto") if k in mapa_idx), None)
+    idx_dur_ms = next((mapa_idx[k] for k in ("duration_ms", "duracion_ms") if k in mapa_idx), None)
+    idx_bytes_tot = next((mapa_idx[k] for k in ("total_bytes", "bytes") if k in mapa_idx), None)
     mapa_proto_num = {"TCP": 6.0, "UDP": 17.0, "ICMP": 1.0}
 
     def limpiar_proto(p_val: str) -> str:
@@ -2152,7 +2330,7 @@ def _parsear_csv_validacion_pasiva(contenido_bytes: bytes) -> List[RegistroFlujo
         columnas_meta = {
             "flow id", "id", "source ip", "src_ip", "srcip",
             "destination ip", "dst_ip", "dstip", "timestamp", "time",
-            "simillarhttp", "external ip", "label",
+            "simillarhttp", "external ip", "label", "duration_ms", "duracion_ms", "total_bytes", "bytes",
         }
         indices_descarte = {i for i, c in enumerate(columnas) if c.lower() in columnas_meta}
         if idx_proto is not None and (len(columnas) - len(indices_descarte)) > TOTAL_CANONICAS:
@@ -2164,6 +2342,8 @@ def _parsear_csv_validacion_pasiva(contenido_bytes: bytes) -> List[RegistroFlujo
     ips_origen = []
     ips_destino = []
     protos = []
+    duraciones_ms = []
+    bytes_totales_lista = []
 
     for n_fila, fila in enumerate(lector):
         if n_fila >= 5000:
@@ -2205,6 +2385,31 @@ def _parsear_csv_validacion_pasiva(contenido_bytes: bytes) -> List[RegistroFlujo
                 vec[j] = float(np.float32(val))
         filas_num.append(vec)
 
+        dur_val = None
+        if idx_dur_ms is not None and idx_dur_ms < len_f:
+            try:
+                cand_d = float(fila[idx_dur_ms].strip())
+                if math.isfinite(cand_d) and cand_d >= 0.0:
+                    dur_val = round(cand_d, 2)
+            except ValueError:
+                pass
+        if dur_val is None:
+            # Flow Duration canónica (índice 3) está en microsegundos
+            dur_val = round(max(0.0, float(vec[3]) / 1000.0), 2) if es_canonico else round(max(0.0, float(vec[3]) / 1000.0), 2)
+        duraciones_ms.append(dur_val)
+
+        bytes_val = None
+        if idx_bytes_tot is not None and idx_bytes_tot < len_f:
+            try:
+                cand_b = float(fila[idx_bytes_tot].strip())
+                if math.isfinite(cand_b) and cand_b >= 0.0:
+                    bytes_val = int(round(cand_b))
+            except ValueError:
+                pass
+        if bytes_val is None:
+            bytes_val = int(max(0, round(float(vec[6]) + float(vec[7]))))
+        bytes_totales_lista.append(bytes_val)
+
     tiempo_export = time.time()
     return [
         RegistroFlujo(
@@ -2212,8 +2417,8 @@ def _parsear_csv_validacion_pasiva(contenido_bytes: bytes) -> List[RegistroFlujo
             src_ip=ips_origen[idx],
             dst_ip=ips_destino[idx],
             protocol=protos[idx],
-            duration_ms=50.0,
-            total_bytes=1024,
+            duration_ms=duraciones_ms[idx],
+            total_bytes=bytes_totales_lista[idx],
             exported_at=tiempo_export,
         )
         for idx in range(len(filas_num))
@@ -2223,7 +2428,6 @@ def _parsear_csv_validacion_pasiva(contenido_bytes: bytes) -> List[RegistroFlujo
 @aplicacion.post("/api/import/csv", dependencies=[Depends(verificar_acceso_operativo)])
 async def importar_registros_csv(
     file: UploadFile = File(..., description="Archivo CSV con telemetría de red autorizada de la Pyme"),
-    db: Session = Depends(obtener_bd),
 ):
     if not motor_inferencia.listo:
         raise HTTPException(status_code=503, detail="Modelo Conv1D no disponible")
@@ -2248,6 +2452,17 @@ async def importar_registros_csv(
     try:
         t0 = time.perf_counter()
         registros = await run_in_threadpool(_parsear_csv_validacion_pasiva, contenido_bytes)
+        if not registros:
+            return {
+                "status": "success",
+                "filename": file.filename,
+                "processed_flows": 0,
+                "benign_flows": 0,
+                "ddos_detected": 0,
+                "anonymized": True,
+                "source": "csv_pyme",
+                "eval_time_ms": round((time.perf_counter() - t0) * 1000, 2),
+            }
         cargas = await procesar_registros_flujo(registros, "csv_pyme", t0)
         total_eval = len(cargas)
         ataques_eval = sum(1 for c in cargas if c["is_attack"])
@@ -2265,41 +2480,41 @@ async def importar_registros_csv(
         }
     except HTTPException:
         raise
-    except Exception as exc:
+    except Exception:
         registro_logger.exception("Error procesando CSV de validación pasiva")
-        raise HTTPException(status_code=500, detail=f"Error analizando archivo CSV: {str(exc)}")
+        raise HTTPException(status_code=500, detail="Error analizando el archivo CSV suministrado")
 
 
 # --- Telemetría de Recursos de Hardware ---
-_cache_memoria_uss: tuple[float, float] = (0.0, 0.0)
-TTL_CACHE_MEMORIA_USS_SEG: float = 2.0
+_cache_memoria_proceso: tuple[float, float, float] = (0.0, 0.0, 0.0)
+TTL_CACHE_MEMORIA_SEG: float = 2.0
 
 
-def _obtener_memoria_proceso_mb() -> float:
-    global _cache_memoria_uss
+def _obtener_memoria_proceso_mb() -> tuple[float, float]:
+    """Mide memoria física real RSS (metodología de tesis) y USS sin descuentos artificiales."""
+    global _cache_memoria_proceso
     ahora_mono = time.monotonic()
-    marca_previa, mb_previos = _cache_memoria_uss
-    if mb_previos > 0.0 and (ahora_mono - marca_previa) < TTL_CACHE_MEMORIA_USS_SEG:
-        return mb_previos
+    marca_previa, rss_prev, uss_prev = _cache_memoria_proceso
+    if rss_prev > 0.0 and (ahora_mono - marca_previa) < TTL_CACHE_MEMORIA_SEG:
+        return rss_prev, uss_prev
 
+    rss_bytes = _proceso_sistema.memory_info().rss
+    uss_bytes = rss_bytes
     try:
         info_completa = _proceso_sistema.memory_full_info()
-        bytes_mem = getattr(info_completa, "uss", None) or info_completa.rss
+        uss_bytes = getattr(info_completa, "uss", None) or rss_bytes
     except Exception:
-        bytes_mem = _proceso_sistema.memory_info().rss
+        pass
 
-    valor_mb = bytes_mem / (1024 * 1024)
-    # Si el proceso comparte espacio con Scapy (ej. suite de pruebas en proceso único), descontar huella del sniffer
-    if "scapy.all" in os.sys.modules or "scapy" in os.sys.modules:
-        valor_mb = max(85.0, valor_mb - 68.0)
-    valor_mb = round(valor_mb, 1)
-    _cache_memoria_uss = (ahora_mono, valor_mb)
-    return valor_mb
+    rss_mb = round(rss_bytes / (1024 * 1024), 1)
+    uss_mb = round(uss_bytes / (1024 * 1024), 1)
+    _cache_memoria_proceso = (ahora_mono, rss_mb, uss_mb)
+    return rss_mb, uss_mb
 
 
 @aplicacion.get("/api/performance")
 async def obtener_rendimiento_sistema():
-    memoria_mb = _obtener_memoria_proceso_mb()
+    rss_mb, uss_mb = _obtener_memoria_proceso_mb()
     return {
         **telemetria.captura_instantanea(),
         "db_write_queue": escritor_bd.cola_pendientes.qsize(),
@@ -2307,7 +2522,8 @@ async def obtener_rendimiento_sistema():
         "db_write_dropped": escritor_bd.filas_descartadas,
         "cpu_percent": round(psutil.cpu_percent(None), 1),
         "process_cpu_percent": round(_proceso_sistema.cpu_percent(None) / (psutil.cpu_count() or 1), 1),
-        "ram_mb": memoria_mb,
+        "ram_mb": rss_mb,
+        "ram_uss_mb": uss_mb,
         "total_ram_gb": round(psutil.virtual_memory().total / (1024 ** 3), 1),
         "gpu_usage": 0,
     }
@@ -2401,14 +2617,69 @@ PALABRAS_CLAVE_VPS_DATACENTER = (
 )
 
 _gateways_detectados: set[str] = set()
-_gateway_principal: str = "192.168.18.1"
+_gateway_principal: str = ""
 _eventos_soar_recientes: deque = deque(maxlen=MAX_EVENTOS_SOAR_HISTORIAL)
 _cache_forense_lan: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()
 _cache_forense_wan: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()
 _cache_sans_isc: "OrderedDict[str, tuple[float, dict]]" = OrderedDict()
 _ultimas_ips_investigadas: "OrderedDict[str, float]" = OrderedDict()
 _tarea_expiracion_soar: Optional[asyncio.Task] = None
+_tareas_soar_activas: set[asyncio.Task] = set()
+_bloqueo_soar_toggle_async = asyncio.Lock()
 _contador_eventos_soar: int = 0
+
+
+def _registrar_tarea_soar(coro, nombre: str) -> Optional[asyncio.Task]:
+    """Mantiene referencia fuerte a tareas en segundo plano SOAR hasta su finalización."""
+    try:
+        bucle = asyncio.get_running_loop()
+    except RuntimeError:
+        coro.close()
+        return None
+    tarea = bucle.create_task(coro, name=nombre)
+    _tareas_soar_activas.add(tarea)
+    tarea.add_done_callback(_tareas_soar_activas.discard)
+    return tarea
+
+
+def _obtener_ip_local_principal() -> str:
+    """Devuelve dinámicamente la IP IPv4 principal de la interfaz de salida real sin literales hardcodeados."""
+    for candidata in ((os.getenv("LOCAL_HOST_IP") or "").strip(), _IP_LOCAL_PRINCIPAL_RUTA):
+        if candidata:
+            try:
+                ip_obj_cand = ipaddress.ip_address(candidata)
+                if ip_obj_cand.version == 4 and not ip_obj_cand.is_loopback and not ip_obj_cand.is_unspecified:
+                    return str(ip_obj_cand)
+            except ValueError:
+                pass
+
+    candidatas_privadas: list[ipaddress.IPv4Address] = []
+    candidatas_otras: list[ipaddress.IPv4Address] = []
+    for ip_s in _IPS_PROPIAS_SERVIDOR:
+        try:
+            ip_obj = ipaddress.ip_address(ip_s)
+        except ValueError:
+            continue
+        if ip_obj.version != 4 or ip_obj.is_loopback or ip_obj.is_unspecified or ip_obj.is_link_local:
+            continue
+        if ip_obj.is_private:
+            candidatas_privadas.append(ip_obj)
+        else:
+            candidatas_otras.append(ip_obj)
+
+    if _gateway_principal:
+        partes_gw = _gateway_principal.split(".")
+        if len(partes_gw) == 4:
+            prefijo_gw = f"{partes_gw[0]}.{partes_gw[1]}.{partes_gw[2]}."
+            for ip_obj in sorted(candidatas_privadas):
+                if str(ip_obj).startswith(prefijo_gw):
+                    return str(ip_obj)
+
+    if candidatas_privadas:
+        return str(sorted(candidatas_privadas)[0])
+    if candidatas_otras:
+        return str(sorted(candidatas_otras)[0])
+    return "127.0.0.1"
 
 
 def _inicializar_gateways_candado1() -> None:
@@ -2418,7 +2689,8 @@ def _inicializar_gateways_candado1() -> None:
         if len(partes) == 4 and partes[0] != "127":
             gw_inferido = f"{partes[0]}.{partes[1]}.{partes[2]}.1"
             _gateways_detectados.add(gw_inferido)
-            _gateway_principal = gw_inferido
+            if not _gateway_principal:
+                _gateway_principal = gw_inferido
 
     if os.name == "nt":
         try:
@@ -2426,6 +2698,7 @@ def _inicializar_gateways_candado1() -> None:
                 ["route", "print", "0.0.0.0"],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=1.5,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -2444,18 +2717,16 @@ def _inicializar_gateways_candado1() -> None:
         except Exception:
             pass
 
-    if not _gateways_detectados:
-        _gateways_detectados.add("192.168.18.1")
-
 
 def _obtener_clave_maestra_soar() -> str:
-    return (os.getenv("SOAR_MASTER_PASSWORD") or configuracion.clave_admin or "CyberShield2026!").strip()
+    """Devuelve estrictamente SOAR_MASTER_PASSWORD (sin fallback a ADMIN_PASSWORD ni secretos por defecto)."""
+    return (configuracion.clave_maestra_soar or "").strip()
 
 
 def _verificar_clave_maestra_soar(clave_ingresada: str) -> bool:
-    if not clave_ingresada:
-        return False
     clave_esperada = _obtener_clave_maestra_soar()
+    if not clave_esperada or not clave_ingresada:
+        return False
     hash_recibido = hashlib.pbkdf2_hmac("sha256", clave_ingresada.strip().encode("utf-8"), _SALT_PBKDF2, _ITERACIONES_PBKDF2).hex()
     hash_esperado = hashlib.pbkdf2_hmac("sha256", clave_esperada.encode("utf-8"), _SALT_PBKDF2, _ITERACIONES_PBKDF2).hex()
     return hmac.compare_digest(hash_recibido, hash_esperado)
@@ -2559,6 +2830,7 @@ def _ejecutar_netsh_sincrono(argumentos: List[str]) -> tuple[bool, str]:
             ["netsh", "advfirewall", "firewall"] + argumentos,
             capture_output=True,
             text=True,
+            errors="replace",
             timeout=3.0,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
@@ -2576,7 +2848,7 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool =
         if es_permanente
         else "CyberShield SOAR IPS Cuarentena Temporal 15m"
     )
-    # 1. Bloquear tráfico ENTRANTE de inmediato para frenar el ataque en el acto
+    # 1. Bloquear tráfico ENTRANTE de inmediato (requisito obligatorio para declarar mitigación real)
     exito_in, detalle_in = _ejecutar_netsh_sincrono([
         "add", "rule",
         f"name={nombre_regla}",
@@ -2587,6 +2859,13 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool =
         "profile=any",
         f"description={desc}",
     ])
+    if not exito_in:
+        return (
+            False,
+            nombre_regla,
+            detalle_in or "No se pudo aplicar regla entrante (dir=in) en Windows Firewall (requiere Administrador)",
+        )
+
     # 2. Si es una IP LAN privada y la tabla ARP de Windows expiró, refrescar ARP L2 antes de cerrar salida L3
     if os.name == "nt":
         try:
@@ -2597,6 +2876,7 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool =
                     ["arp", "-a", ip_str],
                     capture_output=True,
                     text=True,
+                    errors="replace",
                     timeout=0.8,
                     creationflags=flags_arp,
                 )
@@ -2605,13 +2885,14 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool =
                         ["ping", "-n", "1", "-w", "200", ip_str],
                         capture_output=True,
                         text=True,
+                        errors="replace",
                         timeout=0.5,
                         creationflags=flags_arp,
                     )
         except Exception:
             pass
     # 3. Bloquear también tráfico SALIENTE hacia el atacante
-    exito_out, _ = _ejecutar_netsh_sincrono([
+    _ejecutar_netsh_sincrono([
         "add", "rule",
         f"name={nombre_regla}",
         "dir=out",
@@ -2621,7 +2902,7 @@ def _bloquear_ip_en_windows_firewall_sincrono(ip_str: str, es_permanente: bool =
         "profile=any",
         f"description={desc}",
     ])
-    return (exito_in or exito_out), nombre_regla, detalle_in
+    return True, nombre_regla, detalle_in
 
 
 def _desbloquear_ip_en_windows_firewall_sincrono(ip_str: str, nombre_regla: Optional[str] = None) -> tuple[bool, str]:
@@ -2641,6 +2922,7 @@ def _purgar_todas_reglas_cybershield_sincrono(reglas_conocidas: List[str]) -> in
                  f"Remove-NetFirewallRule -DisplayName '{PREFIJO_REGLA_FIREWALL}*' -ErrorAction SilentlyContinue"],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=4.0,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
@@ -2665,7 +2947,7 @@ def _diagnosticar_paso1_ttl_antispoofing(
     ttl_avg_sensor: Optional[float] = None,
     ttl_std_sensor: Optional[float] = None,
 ) -> dict:
-    """Paso 1 Automatizado de TI: Diagnóstico Anti-Spoofing por consistencia de TTL (RFC 4732)."""
+    """Paso 1 Automatizado de TI: Diagnóstico Anti-Spoofing por consistencia de TTL (RFC 4732) sin fabricación de datos."""
     es_privada = False
     es_testbed = ip_str.startswith(("203.0.113.", "198.51.100.", "192.0.2."))
     try:
@@ -2674,17 +2956,28 @@ def _diagnosticar_paso1_ttl_antispoofing(
     except ValueError:
         pass
 
-    ttl_base = float(ttl_avg_sensor) if (ttl_avg_sensor is not None and ttl_avg_sensor > 0) else (128.0 if es_privada else 56.0)
-    ttl_std = float(ttl_std_sensor) if (ttl_std_sensor is not None and ttl_std_sensor >= 0) else (0.0 if es_privada else 0.4)
+    ttl_observado = ttl_avg_sensor is not None and float(ttl_avg_sensor) > 0.0
+    ttl_base: Optional[float] = round(float(ttl_avg_sensor), 1) if ttl_observado else None
+    ttl_std: Optional[float] = (
+        round(float(ttl_std_sensor), 2)
+        if (ttl_observado and ttl_std_sensor is not None and float(ttl_std_sensor) >= 0.0)
+        else None
+    )
     sospecha_spoofing = False
-    motivo_ttl = f"Ruta de red consistente (TTL≈{ttl_base:.0f}, σ={ttl_std:.2f} ≤ 1.0) — Origen verificado"
 
-    if ttl_std_sensor is not None and ttl_std_sensor > 1.0:
-        sospecha_spoofing = True
-        motivo_ttl = f"Alerta RFC 4732: Saltos erráticos de TTL (TTL≈{ttl_base:.0f}, σ={ttl_std:.2f} > 1.0) — Alta sospecha de IP Spoofing"
+    if ttl_observado and ttl_base is not None:
+        if ttl_std is not None and ttl_std > 1.0:
+            sospecha_spoofing = True
+            motivo_ttl = (
+                f"Alerta RFC 4732: Saltos erráticos de TTL (TTL≈{ttl_base:.0f}, σ={ttl_std:.2f} > 1.0) — Alta sospecha de IP Spoofing"
+            )
+        else:
+            std_txt = f"{ttl_std:.2f}" if ttl_std is not None else "0.00"
+            motivo_ttl = f"Ruta de red consistente (TTL≈{ttl_base:.0f}, σ={std_txt} ≤ 1.0) — Origen verificado"
+    else:
+        motivo_ttl = "TTL no observado en este evento (flujo sin telemetría L3 del sensor en vivo)"
 
     if features and len(features) >= 70:
-        paq_ida = float(features[4])
         paq_vuelta = float(features[5])
         iat_std = float(features[19])
         syn_cnt = float(features[46])
@@ -2693,27 +2986,27 @@ def _diagnosticar_paso1_ttl_antispoofing(
 
         if protocolo == "TCP" and syn_cnt >= 20.0 and ack_cnt == 0.0 and paq_vuelta == 0.0 and win_ida <= 512.0:
             sospecha_spoofing = True
-            if ttl_std <= 1.0:
-                ttl_std = 6.8
             motivo_ttl = "Alerta RFC 4732: Inundación SYN pura sin Handshake (Alta sospecha de IP Spoofing)"
         elif iat_std > 250000.0 and paq_vuelta == 0.0 and syn_cnt > 5.0 and not es_privada:
             sospecha_spoofing = True
-            if ttl_std <= 1.0:
-                ttl_std = 4.2
             motivo_ttl = "Alerta RFC 4732: Saltos/tiempos erráticos sin retorno (Posible IP Spoofing)"
-        elif not sospecha_spoofing:
-            if ttl_std_sensor is None:
-                ttl_std = 0.0 if es_privada else round(min(0.8, (iat_std / 1e6) if iat_std > 0 else 0.2), 2)
-            motivo_ttl = f"TTL Consistente (~{ttl_base:.0f}, σ={ttl_std}) — Ruta estable verificada"
+
+    if sospecha_spoofing:
+        badge_ttl = "Posible Spoofing"
+    elif ttl_observado and ttl_base is not None:
+        badge_ttl = f"TTL ~{ttl_base:.0f} (σ={ttl_std:.2f})" if ttl_std is not None else f"TTL ~{ttl_base:.0f}"
+    else:
+        badge_ttl = "TTL no observado (sin sensor)"
 
     return {
         "step": 1,
         "title": "Anti-Spoofing TTL (RFC 4732)",
-        "ttl_estimated": round(ttl_base, 1),
-        "ttl_std": round(ttl_std, 2),
-        "consistent": not sospecha_spoofing,
+        "ttl_estimated": ttl_base,
+        "ttl_std": ttl_std,
+        "ttl_observed": ttl_observado,
+        "consistent": (not sospecha_spoofing) if ttl_observado else None,
         "spoofing_suspect": sospecha_spoofing,
-        "badge": "Posible Spoofing" if sospecha_spoofing else f"TTL ~{ttl_base:.0f} (σ={ttl_std:.2f})",
+        "badge": badge_ttl,
         "detail": motivo_ttl,
     }
 
@@ -2766,10 +3059,8 @@ def _clasificar_naturaleza_mac_y_ttl(mac_str: str, hostname: str, ttl_observado:
 
 
 _ARCHIVO_CACHE_ARP_LAN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "lan_arp_cache.json")
-_memoria_arp_lan_persistente: dict[str, str] = {
-    "192.168.18.64": "F8-AC-65-80-EC-5B",
-    "192.168.18.12": "88-D7-F6-E2-2F-7A",
-}
+_memoria_arp_lan_persistente: dict[str, str] = {}
+_semaforo_rdns_lan = threading.Semaphore(4)
 if os.path.exists(_ARCHIVO_CACHE_ARP_LAN):
     try:
         with open(_ARCHIVO_CACHE_ARP_LAN, encoding="utf-8") as _f_arp:
@@ -2793,14 +3084,49 @@ def _guardar_mac_lan_persistente(ip_str: str, mac_str: str) -> None:
         pass
 
 
+def _resolver_hostname_con_timeout(ip_str: str, timeout_seg: float = 0.6) -> Optional[str]:
+    """Resuelve rDNS en un hilo acotado sin mutar socket.setdefaulttimeout() global."""
+    if not _semaforo_rdns_lan.acquire(blocking=False):
+        return None
+    resultado_host: list[Optional[str]] = [None]
+
+    def _trabajador() -> None:
+        try:
+            info_host = socket.gethostbyaddr(ip_str)
+            if info_host and info_host[0]:
+                resultado_host[0] = str(info_host[0]).strip()
+        except Exception:
+            pass
+        finally:
+            _semaforo_rdns_lan.release()
+
+    hilo = threading.Thread(target=_trabajador, daemon=True, name="soar-rdns-lan")
+    hilo.start()
+    hilo.join(timeout=timeout_seg)
+    return resultado_host[0]
+
+
 def _consultar_paso2_arp_lan_sincrono(ip_str: str, ttl_observado: Optional[float] = None) -> dict:
     """Paso 2 Automatizado de TI: Dirección MAC física, Hostname, Naturaleza OUI/LAA/VM y cruce TTL (Red Local LAN)."""
     es_testbed = ip_str.startswith(("203.0.113.", "198.51.100.", "192.0.2."))
     try:
         ip_obj = ipaddress.ip_address(ip_str)
+        ip_canonica = str(ip_obj)
         es_lan = ip_obj.is_private and not es_testbed
     except ValueError:
-        es_lan = False
+        return {
+            "step": 2,
+            "title": "Forense LAN (ARP / Hostname / OUI)",
+            "applicable": False,
+            "is_lan": False,
+            "mac": "N/A (IP Inválida)",
+            "hostname": "N/A",
+            "vendor": "N/A",
+            "device_nature": "IP con formato inválido",
+            "nat_vm_warning": None,
+            "badge": "IP Inválida",
+            "detail": "Dirección IP con formato inválido para análisis forense LAN",
+        }
 
     if not es_lan:
         return {
@@ -2818,7 +3144,7 @@ def _consultar_paso2_arp_lan_sincrono(ip_str: str, ttl_observado: Optional[float
         }
 
     ahora = time.monotonic()
-    clave_cache = f"{ip_str}:{int(round(ttl_observado)) if ttl_observado else 0}"
+    clave_cache = f"{ip_canonica}:{int(round(ttl_observado)) if ttl_observado else 0}"
     en_cache = _cache_forense_lan.get(clave_cache)
     if en_cache and (ahora - en_cache[0]) < 300.0:
         _cache_forense_lan.move_to_end(clave_cache)
@@ -2829,9 +3155,10 @@ def _consultar_paso2_arp_lan_sincrono(ip_str: str, ttl_observado: Optional[float
         try:
             flags_arp = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             proc = subprocess.run(
-                ["arp", "-a", ip_str],
+                ["arp", "-a", ip_canonica],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=1.0,
                 creationflags=flags_arp,
             )
@@ -2839,16 +3166,18 @@ def _consultar_paso2_arp_lan_sincrono(ip_str: str, ttl_observado: Optional[float
             if not coincidencia:
                 # Si la caché ARP de Windows expiró por inactividad, forzar resolución ARP L2 en la subred LAN
                 subprocess.run(
-                    ["ping", "-n", "1", "-w", "250", ip_str],
+                    ["ping", "-n", "1", "-w", "250", ip_canonica],
                     capture_output=True,
                     text=True,
+                    errors="replace",
                     timeout=0.6,
                     creationflags=flags_arp,
                 )
                 proc = subprocess.run(
-                    ["arp", "-a", ip_str],
+                    ["arp", "-a", ip_canonica],
                     capture_output=True,
                     text=True,
+                    errors="replace",
                     timeout=1.0,
                     creationflags=flags_arp,
                 )
@@ -2857,24 +3186,14 @@ def _consultar_paso2_arp_lan_sincrono(ip_str: str, ttl_observado: Optional[float
                 cand_mac = coincidencia.group(0).upper().replace(":", "-")
                 if cand_mac != "00-00-00-00-00-00" and cand_mac != "FF-FF-FF-FF-FF-FF":
                     mac_detectada = cand_mac
-                    _guardar_mac_lan_persistente(ip_str, mac_detectada)
+                    _guardar_mac_lan_persistente(ip_canonica, mac_detectada)
         except Exception:
             pass
 
-    if mac_detectada.startswith("No ") and ip_str in _memoria_arp_lan_persistente:
-        mac_detectada = _memoria_arp_lan_persistente[ip_str]
+    if mac_detectada.startswith("No ") and ip_canonica in _memoria_arp_lan_persistente:
+        mac_detectada = _memoria_arp_lan_persistente[ip_canonica]
 
-    hostname_detectado = "Equipo-LAN-SinNombre"
-    try:
-        socket.setdefaulttimeout(0.6)
-        info_host = socket.gethostbyaddr(ip_str)
-        if info_host and info_host[0]:
-            hostname_detectado = info_host[0]
-    except Exception:
-        if ip_str == "192.168.18.12":
-            hostname_detectado = "DESKTOP-3J2KD76"
-            if mac_detectada.startswith("No "):
-                mac_detectada = "88-D7-F6-E2-2F-7A"
+    hostname_detectado = _resolver_hostname_con_timeout(ip_canonica, timeout_seg=0.6) or "Equipo-LAN-SinNombre"
 
     fabricante, naturaleza_equipo, alerta_vm_nat = _clasificar_naturaleza_mac_y_ttl(
         mac_detectada, hostname_detectado, ttl_observado
@@ -2912,13 +3231,25 @@ def _clasificar_naturaleza_wan_isp_asn(isp_str: str, asn_str: str, org_str: str 
 
 
 def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
-    """Paso 3 Automatizado de TI: País, Proveedor ISP, ASN y Clasificación VPS/Cloud vs ISP Residencial."""
+    """Paso 3 Automatizado de TI: País, Proveedor ISP, ASN y Clasificación VPS/Cloud vs ISP Residencial (vía HTTPS)."""
     es_testbed = ip_str.startswith(("203.0.113.", "198.51.100.", "192.0.2."))
     try:
         ip_obj = ipaddress.ip_address(ip_str)
+        ip_canonica = str(ip_obj)
         es_lan = ip_obj.is_private and not es_testbed
     except ValueError:
-        es_lan = False
+        return {
+            "step": 3,
+            "title": "Inteligencia WAN (País / ISP / ASN)",
+            "applicable": False,
+            "is_wan": False,
+            "country": "IP Inválida",
+            "isp": "N/A",
+            "asn": "N/A",
+            "attacker_type": "IP con formato inválido",
+            "badge": "IP Inválida",
+            "detail": "Dirección IP inválida rechazada antes de consultar servicios externos",
+        }
 
     if es_lan:
         return {
@@ -2948,10 +3279,24 @@ def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
             "detail": "País: Testbed (RFC 5737) | ISP: CyberShield Sim | Tipo: Simulador Académico / Testbed",
         }
 
+    if not configuracion.habilitar_enriquecimiento_externo_soar:
+        return {
+            "step": 3,
+            "title": "Inteligencia WAN (País / ISP / ASN)",
+            "applicable": False,
+            "is_wan": True,
+            "country": "Consulta externa desactivada",
+            "isp": "Modo Offline (SOAR_ENABLE_EXTERNAL_ENRICHMENT=false)",
+            "asn": "N/A",
+            "attacker_type": "Externo WAN (Sin enriquecimiento externo)",
+            "badge": "Offline (Opt-Out)",
+            "detail": "Enriquecimiento externo deshabilitado por configuración local de privacidad",
+        }
+
     ahora = time.monotonic()
-    en_cache = _cache_forense_wan.get(ip_str)
+    en_cache = _cache_forense_wan.get(ip_canonica)
     if en_cache and (ahora - en_cache[0]) < TTL_CACHE_FORENSE_SEG:
-        _cache_forense_wan.move_to_end(ip_str)
+        _cache_forense_wan.move_to_end(ip_canonica)
         return en_cache[1]
 
     pais = "Desconocido"
@@ -2960,17 +3305,18 @@ def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
     asn = "ASN No Identificado"
     try:
         req = urllib.request.Request(
-            f"http://ip-api.com/json/{ip_str}?fields=status,country,countryCode,isp,as,org",
-            headers={"User-Agent": "CyberShield-Pyme-SOAR/2.0"},
+            f"https://ipwho.is/{ip_canonica}",
+            headers={"User-Agent": "CyberShield-Pyme-SOAR/2.0", "Accept": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=1.5) as resp:
             datos = json.loads(resp.read().decode("utf-8", errors="ignore"))
-            if datos.get("status") == "success":
+            if isinstance(datos, dict) and datos.get("success") is True:
                 pais = datos.get("country") or "Externo"
-                isp = datos.get("isp") or datos.get("org") or "ISP Externo"
-                org = datos.get("org") or ""
-                asn_raw = datos.get("as") or ""
-                asn = asn_raw.split()[0] if asn_raw else "ASN-WAN"
+                conn = datos.get("connection") if isinstance(datos.get("connection"), dict) else {}
+                isp = conn.get("isp") or conn.get("org") or "ISP Externo"
+                org = conn.get("org") or ""
+                asn_val = conn.get("asn")
+                asn = f"AS{asn_val}" if asn_val else "ASN-WAN"
     except Exception:
         pass
 
@@ -2984,10 +3330,10 @@ def _consultar_paso3_wan_asn_sincrono(ip_str: str) -> dict:
         "isp": isp,
         "asn": asn,
         "attacker_type": tipo_atacante,
-        "badge": f"{pais} • { 'VPS / Cloud' if 'VPS' in tipo_atacante else 'ISP Residencial/Corp' }",
+        "badge": f"{pais} • {'VPS / Cloud' if 'VPS' in tipo_atacante else 'ISP Residencial/Corp'}",
         "detail": f"País: {pais} | ISP: {isp} ({asn}) | Naturaleza: {tipo_atacante}",
     }
-    _cache_forense_wan[ip_str] = (ahora, resultado)
+    _cache_forense_wan[ip_canonica] = (ahora, resultado)
     while len(_cache_forense_wan) > MAX_CACHE_SOAR_ENTRADAS:
         _cache_forense_wan.popitem(last=False)
     return resultado
@@ -2998,9 +3344,19 @@ def _consultar_paso4_sans_isc_sincrono(ip_str: str) -> dict:
     es_testbed = ip_str.startswith(("203.0.113.", "198.51.100.", "192.0.2."))
     try:
         ip_obj = ipaddress.ip_address(ip_str)
+        ip_canonica = str(ip_obj)
         es_lan = ip_obj.is_private and not es_testbed
     except ValueError:
-        es_lan = False
+        return {
+            "step": 4,
+            "title": "Reputación SANS ISC DShield",
+            "applicable": False,
+            "reports": 0,
+            "attacks": 0,
+            "malicious": False,
+            "badge": "IP Inválida",
+            "detail": "Dirección IP inválida rechazada antes de consultar SANS ISC DShield",
+        }
 
     if es_lan:
         return {
@@ -3026,10 +3382,22 @@ def _consultar_paso4_sans_isc_sincrono(ip_str: str) -> dict:
             "detail": "SANS ISC DShield: Rango académico de pruebas RFC 5737 (Sin reportes públicos en Internet)",
         }
 
+    if not configuracion.habilitar_enriquecimiento_externo_soar:
+        return {
+            "step": 4,
+            "title": "Reputación SANS ISC DShield",
+            "applicable": False,
+            "reports": 0,
+            "attacks": 0,
+            "malicious": False,
+            "badge": "Offline (Opt-Out)",
+            "detail": "Consulta externa SANS ISC deshabilitada (SOAR_ENABLE_EXTERNAL_ENRICHMENT=false)",
+        }
+
     ahora = time.monotonic()
-    en_cache = _cache_sans_isc.get(ip_str)
+    en_cache = _cache_sans_isc.get(ip_canonica)
     if en_cache and (ahora - en_cache[0]) < TTL_CACHE_FORENSE_SEG:
-        _cache_sans_isc.move_to_end(ip_str)
+        _cache_sans_isc.move_to_end(ip_canonica)
         return en_cache[1]
 
     reportes = 0
@@ -3038,7 +3406,7 @@ def _consultar_paso4_sans_isc_sincrono(ip_str: str) -> dict:
     consultado_ok = False
 
     try:
-        url_sans = f"https://isc.sans.edu/api/ip/{ip_str}?json"
+        url_sans = f"https://isc.sans.edu/api/ip/{ip_canonica}?json"
         req = urllib.request.Request(
             url_sans,
             headers={
@@ -3079,7 +3447,7 @@ def _consultar_paso4_sans_isc_sincrono(ip_str: str) -> dict:
         "badge": badge,
         "detail": detalle,
     }
-    _cache_sans_isc[ip_str] = (ahora, resultado)
+    _cache_sans_isc[ip_canonica] = (ahora, resultado)
     while len(_cache_sans_isc) > MAX_CACHE_SOAR_ENTRADAS:
         _cache_sans_isc.popitem(last=False)
     return resultado
@@ -3144,8 +3512,13 @@ async def _aplicar_paso5_mitigacion_firewall(
             "detail": motivo_c1,
         }
 
-    # Si ya está bloqueada en cuarentena activa y es flujo automático, conservar estado
-    if ip_str in _cuarentena_activa and not es_manual and not _cuarentena_activa[ip_str].get("fast_path_pending"):
+    # Si ya está bloqueada realmente en Firewall OS y es flujo automático, conservar estado
+    if (
+        ip_str in _cuarentena_activa
+        and not es_manual
+        and not _cuarentena_activa[ip_str].get("fast_path_pending")
+        and _cuarentena_activa[ip_str].get("firewall_os_applied")
+    ):
         entrada_actual = _cuarentena_activa[ip_str]
         if entrada_actual.get("is_permanent"):
             return {
@@ -3155,6 +3528,7 @@ async def _aplicar_paso5_mitigacion_firewall(
                 "is_permanent": True,
                 "lock_triggered": "Bloqueo Manual Permanente",
                 "rule_name": entrada_actual["rule_name"],
+                "firewall_os_applied": True,
                 "badge": "En Cuarentena (Permanente)",
                 "detail": f"Regla permanente {entrada_actual['rule_name']} activa en Windows Firewall (Hasta desbloqueo manual)",
             }
@@ -3166,18 +3540,21 @@ async def _aplicar_paso5_mitigacion_firewall(
             "is_permanent": False,
             "lock_triggered": "Candado 3 (TTL 15 min Activo)",
             "rule_name": entrada_actual["rule_name"],
+            "firewall_os_applied": True,
             "badge": f"En Cuarentena ({restantes // 60}m {restantes % 60}s)",
             "detail": f"Regla activa {entrada_actual['rule_name']} en Windows Firewall (Expira en {restantes}s)",
         }
 
     # 2. Candado 2: Guardia Anti-Spoofing (en modo automático)
     if not es_manual and paso1.get("spoofing_suspect"):
+        _cuarentena_activa.pop(ip_str, None)
         return {
             "step": 5,
             "title": "Acción en Firewall (netsh)",
             "blocked": False,
             "lock_triggered": "Candado 2 (Anti-Spoofing Guard)",
             "rule_name": None,
+            "firewall_os_applied": False,
             "badge": "Omitido (Candado 2 Spoofing)",
             "detail": "Candado 2 Activo: Autobloqueo retenido por alta sospecha de IP Spoofing (evita denegación inducida)",
         }
@@ -3190,6 +3567,7 @@ async def _aplicar_paso5_mitigacion_firewall(
             "blocked": False,
             "lock_triggered": "Control Operador (1-Clic)",
             "rule_name": None,
+            "firewall_os_applied": False,
             "badge": "Listo para Bloquear (1-Clic)",
             "detail": "Investigación completada. Disponible para bloqueo permanente o temporal (15m) en 1 clic",
         }
@@ -3198,12 +3576,33 @@ async def _aplicar_paso5_mitigacion_firewall(
     es_permanente = bool(es_manual and str(modo_duracion).lower() == "permanent")
     previa_q = _cuarentena_activa.get(ip_str) or {}
     if previa_q.get("fast_path_fw_done") and not es_permanente:
-        exito_fw = bool(previa_q.get("firewall_os_applied", True))
+        exito_fw = bool(previa_q.get("firewall_os_applied", False))
         nombre_regla = str(previa_q.get("rule_name") or _nombre_regla_firewall_ip(ip_str))
+        detalle_fw = str(previa_q.get("firewall_error_detail") or "")
     else:
-        exito_fw, nombre_regla, _ = await run_in_threadpool(
+        exito_fw, nombre_regla, detalle_fw = await run_in_threadpool(
             _bloquear_ip_en_windows_firewall_sincrono, ip_str, es_permanente
         )
+
+    if not exito_fw:
+        _cuarentena_activa.pop(ip_str, None)
+        registro_logger.warning(
+            "SOAR Firewall OS falló para %s (%s): no se registra en cuarentena para evitar puntos ciegos NIDS",
+            _sanitizar_texto_log(ip_str, 45),
+            _sanitizar_texto_log(detalle_fw or "sin privilegios de Administrador", 160),
+        )
+        return {
+            "step": 5,
+            "title": "Acción en Firewall (netsh)",
+            "blocked": False,
+            "is_permanent": False,
+            "lock_triggered": "Fallo Firewall OS",
+            "rule_name": None,
+            "firewall_os_applied": False,
+            "badge": "Sin mitigación (Error Firewall OS)",
+            "detail": detalle_fw or "No se pudo aplicar regla en Windows Firewall (requiere privilegios de Administrador)",
+        }
+
     ahora_epoch = float(previa_q.get("blocked_at") or time.time()) if (previa_q.get("fast_path_pending") and not es_manual) else time.time()
     expira_epoch = None if es_permanente else (ahora_epoch + TTL_CUARENTENA_SOAR_SEG)
 
@@ -3236,7 +3635,7 @@ async def _aplicar_paso5_mitigacion_firewall(
         "is_permanent": es_permanente,
         "duration_mode": "permanent" if es_permanente else "15m",
         "ttl_seconds": None if es_permanente else int(TTL_CUARENTENA_SOAR_SEG),
-        "firewall_os_applied": exito_fw,
+        "firewall_os_applied": True,
         "mode": "Manual Permanente" if es_permanente else ("Manual 15 min" if es_manual else "Automático IPS (15m)"),
         "sans_reports": paso4.get("reports", 0),
         "mitigated_flows": int(previa_q.get("mitigated_flows") or 0),
@@ -3261,7 +3660,7 @@ async def _aplicar_paso5_mitigacion_firewall(
         "is_permanent": es_permanente,
         "lock_triggered": candado_info,
         "rule_name": nombre_regla,
-        "firewall_os_applied": exito_fw,
+        "firewall_os_applied": True,
         "badge": badge_paso5,
         "detail": estado_texto,
     }
@@ -3269,7 +3668,7 @@ async def _aplicar_paso5_mitigacion_firewall(
 
 async def _ejecutar_pipeline_5_pasos_soar(
     ip_atacante: str,
-    ip_destino: str = "192.168.18.10",
+    ip_destino: Optional[str] = None,
     protocolo: str = "TCP",
     confianza: float = 99.0,
     features: Optional[List[float]] = None,
@@ -3282,11 +3681,12 @@ async def _ejecutar_pipeline_5_pasos_soar(
 ) -> dict:
     global _contador_eventos_soar
     ip_limpia = (ip_atacante or "").strip()
+    ip_destino_final = (ip_destino or "").strip() or _obtener_ip_local_principal()
 
     paso1 = _diagnosticar_paso1_ttl_antispoofing(
         ip_limpia, protocolo, features, ttl_avg_sensor=ttl_avg, ttl_std_sensor=ttl_std
     )
-    ttl_para_paso2 = ttl_avg if ttl_avg is not None else paso1.get("ttl_estimated")
+    ttl_para_paso2 = float(ttl_avg) if (ttl_avg is not None and float(ttl_avg) > 0.0) else None
 
     # Fast-Path paralelo: si aplica bloqueo automático y no está aún aplicado en el SO,
     # ejecutar netsh advfirewall en paralelo con ARP/WAN/SANS sin esperar DNS/HTTP.
@@ -3299,7 +3699,7 @@ async def _ejecutar_pipeline_5_pasos_soar(
         and (ip_limpia not in _cuarentena_activa or _cuarentena_activa[ip_limpia].get("fast_path_pending"))
     )
     if debe_pre_bloquear_fw:
-        (exito_fp, regla_fp, _), paso2, paso3, paso4 = await asyncio.gather(
+        (exito_fp, regla_fp, detalle_fp), paso2, paso3, paso4 = await asyncio.gather(
             run_in_threadpool(_bloquear_ip_en_windows_firewall_sincrono, ip_limpia, False),
             run_in_threadpool(_consultar_paso2_arp_lan_sincrono, ip_limpia, ttl_para_paso2),
             run_in_threadpool(_consultar_paso3_wan_asn_sincrono, ip_limpia),
@@ -3309,7 +3709,8 @@ async def _ejecutar_pipeline_5_pasos_soar(
             paso2 = await run_in_threadpool(_consultar_paso2_arp_lan_sincrono, ip_limpia, ttl_para_paso2)
         if ip_limpia in _cuarentena_activa:
             _cuarentena_activa[ip_limpia]["fast_path_fw_done"] = True
-            _cuarentena_activa[ip_limpia]["firewall_os_applied"] = exito_fp
+            _cuarentena_activa[ip_limpia]["firewall_os_applied"] = bool(exito_fp)
+            _cuarentena_activa[ip_limpia]["firewall_error_detail"] = detalle_fp
             _cuarentena_activa[ip_limpia]["rule_name"] = regla_fp
     else:
         paso2, paso3, paso4 = await asyncio.gather(
@@ -3331,17 +3732,18 @@ async def _ejecutar_pipeline_5_pasos_soar(
 
     _contador_eventos_soar += 1
     info_q_actual = _cuarentena_activa.get(ip_limpia)
+    bloqueo_real_vigente = bool(paso5.get("blocked")) or bool(info_q_actual and info_q_actual.get("firewall_os_applied"))
     evento = {
         "event_id": _contador_eventos_soar,
         "timestamp": fecha_a_iso_utc(obtener_utc_ingenuo()),
         "src_ip": ip_limpia,
-        "dst_ip": ip_destino,
+        "dst_ip": ip_destino_final,
         "protocol": protocolo,
         "confidence_percentage": round(float(confianza), 2),
         "source": origen_evento,
         "is_lan": bool(paso2.get("is_lan")),
-        "is_blocked": bool(paso5.get("blocked")) or (ip_limpia in _cuarentena_activa),
-        "is_permanent": bool(info_q_actual and info_q_actual.get("is_permanent")),
+        "is_blocked": bloqueo_real_vigente,
+        "is_permanent": bool(bloqueo_real_vigente and info_q_actual and info_q_actual.get("is_permanent")),
         "steps": {
             "step1_ttl": paso1,
             "step2_lan": paso2,
@@ -3365,10 +3767,18 @@ _semaforo_soar_background = asyncio.Semaphore(2)
 
 
 async def _ejecutar_soar_con_semaforo(**kwargs) -> None:
-    async with _semaforo_soar_background:
-        if not _modulo_soar_activo:
-            return
-        await _ejecutar_pipeline_5_pasos_soar(**kwargs)
+    try:
+        async with _semaforo_soar_background:
+            if not _modulo_soar_activo:
+                return
+            await _ejecutar_pipeline_5_pasos_soar(**kwargs)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        registro_logger.exception(
+            "Error en investigación asíncrona SOAR para IP %s",
+            _sanitizar_texto_log(str(kwargs.get("ip_atacante") or ""), 45),
+        )
 
 
 def _disparar_investigacion_soar_asincrona(
@@ -3397,9 +3807,7 @@ def _disparar_investigacion_soar_asincrona(
     while len(_ultimas_ips_investigadas) > MAX_CACHE_SOAR_ENTRADAS:
         _ultimas_ips_investigadas.popitem(last=False)
 
-    # Fast-Path IPS: Si el autobloqueo está activo y pasa Candados 1 y 2 en O(1),
-    # registrar en _cuarentena_activa inmediatamente (<0.1ms) para suprimir ráfagas subsecuentes
-    # mientras el hilo secundario aplica netsh y enriquece ARP/ASN/SANS.
+    # Fast-Path IPS: reserva transitoria sin marcar firewall_os_applied hasta que netsh confirme éxito real
     if permitir_autobloqueo and _autobloqueo_soar_activo and ip_limpia not in _cuarentena_activa:
         protegida_fp, _ = _evaluar_candado1_ip_protegida(ip_limpia)
         if not protegida_fp:
@@ -3420,7 +3828,7 @@ def _disparar_investigacion_soar_asincrona(
                     "is_permanent": False,
                     "duration_mode": "15m",
                     "ttl_seconds": int(TTL_CUARENTENA_SOAR_SEG),
-                    "firewall_os_applied": True,
+                    "firewall_os_applied": False,
                     "mode": "Automático IPS (15m)",
                     "sans_reports": 0,
                     "mitigated_flows": 0,
@@ -3429,35 +3837,32 @@ def _disparar_investigacion_soar_asincrona(
                 }
                 _asegurar_tarea_expiracion_soar()
 
-    try:
-        bucle = asyncio.get_running_loop()
-        bucle.create_task(
-            _ejecutar_soar_con_semaforo(
-                ip_atacante=ip_limpia,
-                ip_destino=ip_destino,
-                protocolo=protocolo,
-                confianza=confianza,
-                features=features,
-                origen_evento=origen_evento,
-                es_manual=False,
-                permitir_autobloqueo=permitir_autobloqueo,
-                modo_duracion="15m",
-                ttl_avg=ttl_avg,
-                ttl_std=ttl_std,
-            ),
-            name=f"soar-investigar-{ip_limpia}",
-        )
-    except RuntimeError:
-        pass
+    _registrar_tarea_soar(
+        _ejecutar_soar_con_semaforo(
+            ip_atacante=ip_limpia,
+            ip_destino=ip_destino,
+            protocolo=protocolo,
+            confianza=confianza,
+            features=features,
+            origen_evento=origen_evento,
+            es_manual=False,
+            permitir_autobloqueo=permitir_autobloqueo,
+            modo_duracion="15m",
+            ttl_avg=ttl_avg,
+            ttl_std=ttl_std,
+        ),
+        nombre=f"soar-investigar-{ip_limpia}",
+    )
 
 
 async def _sembrar_investigaciones_recientes_al_activar() -> None:
-    """Al activar el módulo SOAR, analiza las últimas IPs atacantes distintas del historial para visualización inmediata."""
+    """Al activar el módulo SOAR, analiza las últimas IPs atacantes distintas en modo solo lectura (sin autobloqueo retroactivo)."""
     if _eventos_soar_recientes:
         return
     try:
+        ip_local_defecto = _obtener_ip_local_principal()
+
         def _obtener_ultimos_atacantes_bd():
-            ahora_utc = obtener_utc_ingenuo()
             with SesionLocal() as db:
                 max_id_actual = int(db.query(func.max(RegistroTrafico.id)).scalar() or 0)
                 id_min_reciente = max(1, max_id_actual - 25000)
@@ -3500,24 +3905,17 @@ async def _sembrar_investigaciones_recientes_al_activar() -> None:
                 vistos = set()
                 reales_sensor = []
                 simulados_u_otros = []
-                for src_ip, dst_ip, proto, conf, src_orig, ts_atq in (filas_sensor + filas_otras):
+                for src_ip, dst_ip, proto, conf, src_orig, _ in (filas_sensor + filas_otras):
                     if not src_ip or src_ip in vistos:
                         continue
                     vistos.add(src_ip)
                     es_rfc5737 = str(src_ip).startswith(("203.0.113.", "198.51.100.", "192.0.2."))
-                    es_reciente_real = (
-                        (src_orig == "sensor")
-                        and not es_rfc5737
-                        and ts_atq is not None
-                        and (ahora_utc - ts_atq).total_seconds() <= 14400.0
-                    )
                     tupla_atq = (
                         src_ip,
-                        dst_ip or "192.168.18.10",
+                        dst_ip or ip_local_defecto,
                         proto or "TCP",
                         float(conf or 99.0),
                         src_orig or "sensor",
-                        bool(es_reciente_real),
                     )
                     if src_orig == "sensor" and not es_rfc5737:
                         reales_sensor.append(tupla_atq)
@@ -3526,10 +3924,8 @@ async def _sembrar_investigaciones_recientes_al_activar() -> None:
                 return (reales_sensor + simulados_u_otros)[:8]
 
         atacantes_recientes = await run_in_threadpool(_obtener_ultimos_atacantes_bd)
-        reales_primero = [t for t in atacantes_recientes if t[5]]
-        otros_despues = [t for t in atacantes_recientes if not t[5]]
 
-        for src_ip, dst_ip, proto, conf, src_orig, auto_bloq in (reales_primero + list(reversed(otros_despues))):
+        for src_ip, dst_ip, proto, conf, src_orig in atacantes_recientes:
             if not _modulo_soar_activo:
                 break
             if src_ip in _cuarentena_activa or any(ev.get("src_ip") == src_ip for ev in _eventos_soar_recientes):
@@ -3542,17 +3938,9 @@ async def _sembrar_investigaciones_recientes_al_activar() -> None:
                 features=None,
                 origen_evento=src_orig,
                 es_manual=False,
-                permitir_autobloqueo=bool(auto_bloq and _autobloqueo_soar_activo),
+                permitir_autobloqueo=False,
                 modo_duracion="15m",
             )
-            # Mantener siempre los ataques reales bloqueados en la cabecera de la lista de incidentes
-            if reales_primero and len(_eventos_soar_recientes) > 1:
-                ordenados = sorted(
-                    list(_eventos_soar_recientes),
-                    key=lambda ev: (0 if ev.get("is_blocked") else 1, -int(ev.get("event_id") or 0)),
-                )
-                _eventos_soar_recientes.clear()
-                _eventos_soar_recientes.extend(ordenados)
     except Exception:
         registro_logger.exception("Error sembrando investigaciones iniciales SOAR")
 
@@ -3570,8 +3958,18 @@ async def _desactivar_y_limpiar_modulo_soar() -> int:
             pass
     _tarea_expiracion_soar = None
 
+    for tarea_bg in list(_tareas_soar_activas):
+        if not tarea_bg.done():
+            tarea_bg.cancel()
+    for tarea_bg in list(_tareas_soar_activas):
+        try:
+            await tarea_bg
+        except (asyncio.CancelledError, Exception):
+            pass
+    _tareas_soar_activas.clear()
+
     reglas_activas = [
-         str(datos.get("rule_name") or _nombre_regla_firewall_ip(ip_k))
+        str(datos.get("rule_name") or _nombre_regla_firewall_ip(ip_k))
         for ip_k, datos in _cuarentena_activa.items()
     ]
     eliminadas = await run_in_threadpool(_purgar_todas_reglas_cybershield_sincrono, reglas_activas)
@@ -3609,17 +4007,25 @@ class SolicitudAccionIpSoar(BaseModel):
 
 
 @aplicacion.get("/api/soar/blocklist.txt", response_class=PlainTextResponse)
-async def obtener_blocklist_plana_edl():
+async def obtener_blocklist_plana_edl(peticion: Request):
     """
     Feed Dinámico de Bloqueo Perimetral (EDL) en texto plano (1 IP por línea)
     para sincronización con Routers/Firewalls empresariales (MikroTik, pfSense, FortiGate).
     """
+    if not _es_acceso_edl_autorizado(peticion):
+        raise HTTPException(
+            status_code=401,
+            detail="Acceso EDL no autorizado. Utilice sesión administrativa, cabecera X-EDL-Token / ?token= o red privada LAN.",
+        )
+
     if not _modulo_soar_activo or not _cuarentena_activa:
         return PlainTextResponse("", media_type="text/plain; charset=utf-8")
 
     ahora_epoch = time.time()
     ips_vigentes = []
     for ip_k, info_q in list(_cuarentena_activa.items()):
+        if not info_q.get("firewall_os_applied"):
+            continue
         es_perm = bool(info_q.get("is_permanent"))
         exp_at = info_q.get("expires_at")
         if es_perm or (exp_at is not None and float(exp_at) > ahora_epoch):
@@ -3631,32 +4037,63 @@ async def obtener_blocklist_plana_edl():
 
 @aplicacion.get("/api/soar/status", dependencies=[Depends(verificar_acceso_operativo)])
 async def obtener_estado_modulo_soar():
+    ahora_epoch = time.time()
+    activas_reales = sum(
+        1
+        for info_q in list(_cuarentena_activa.values())
+        if info_q.get("firewall_os_applied")
+        and (bool(info_q.get("is_permanent")) or (info_q.get("expires_at") is not None and float(info_q.get("expires_at")) > ahora_epoch))
+    )
     return {
         "enabled": _modulo_soar_activo,
         "auto_block": _autobloqueo_soar_activo,
-        "active_quarantine_count": len(_cuarentena_activa),
+        "active_quarantine_count": activas_reales,
         "events_count": len(_eventos_soar_recientes),
         "lock1_protected": _obtener_resumen_candado1() if _modulo_soar_activo else None,
     }
 
 
 @aplicacion.post("/api/soar/toggle", dependencies=[Depends(verificar_acceso_operativo)])
-async def alternar_modulo_soar(solicitud: SolicitudToggleSoar):
+async def alternar_modulo_soar(solicitud: SolicitudToggleSoar, peticion: Request):
     global _modulo_soar_activo, _autobloqueo_soar_activo
 
-    clave_valida = await run_in_threadpool(_verificar_clave_maestra_soar, solicitud.master_password)
-    if not clave_valida:
+    if not _obtener_clave_maestra_soar():
         raise HTTPException(
-            status_code=403,
-            detail="Contraseña Maestra incorrecta. Acceso denegado al Módulo SOAR/IPS.",
+            status_code=503,
+            detail="Servidor sin SOAR_MASTER_PASSWORD configurada en .env (modo Fail-Closed activo).",
         )
+
+    ip_cliente = peticion.client.host if peticion.client else "desconocido"
+    async with _bloqueo_soar_toggle_async:
+        ahora = time.time()
+        segundos_restantes = _verificar_bloqueo_intentos(_intentos_fallidos_soar, ip_cliente, ahora)
+        if segundos_restantes is not None:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Demasiados intentos fallidos de Contraseña Maestra SOAR. Bloqueado por {segundos_restantes}s.",
+            )
+
+        clave_valida = await run_in_threadpool(_verificar_clave_maestra_soar, solicitud.master_password)
+        if not clave_valida:
+            _registrar_fallo_en_tabla(_intentos_fallidos_soar, ip_cliente, time.time())
+            registro_logger.warning(
+                "Intento fallido de Contraseña Maestra SOAR desde IP %s",
+                _sanitizar_texto_log(ip_cliente, 45),
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Contraseña Maestra incorrecta. Acceso denegado al Módulo SOAR/IPS.",
+            )
+
+        with _bloqueo_auth_rate:
+            _intentos_fallidos_soar.pop(ip_cliente, None)
 
     if solicitud.enabled:
         await run_in_threadpool(_inicializar_gateways_candado1)
         _modulo_soar_activo = True
         _autobloqueo_soar_activo = True
         _asegurar_tarea_expiracion_soar()
-        asyncio.create_task(_sembrar_investigaciones_recientes_al_activar(), name="soar-semilla-inicial")
+        _registrar_tarea_soar(_sembrar_investigaciones_recientes_al_activar(), nombre="soar-semilla-inicial")
         registro_logger.info("Módulo SOAR/IPS ACTIVADO mediante Contraseña Maestra")
         return {
             "status": "activated",
@@ -3698,9 +4135,13 @@ async def obtener_datos_centro_soar():
 
     ahora_epoch = time.time()
     lista_cuarentena = []
+    ips_cuarentena_vigente: dict[str, tuple[bool, int]] = {}
     for ip_k, info_q in list(_cuarentena_activa.items()):
+        if not info_q.get("firewall_os_applied"):
+            continue
         es_perm = bool(info_q.get("is_permanent"))
         if es_perm:
+            ips_cuarentena_vigente[ip_k] = (True, -1)
             lista_cuarentena.append({
                 **info_q,
                 "is_permanent": True,
@@ -3710,6 +4151,7 @@ async def obtener_datos_centro_soar():
             restantes = max(0, int(float(info_q.get("expires_at") or 0) - ahora_epoch))
             if restantes <= 0:
                 continue
+            ips_cuarentena_vigente[ip_k] = (False, restantes)
             lista_cuarentena.append({
                 **info_q,
                 "is_permanent": False,
@@ -3719,16 +4161,14 @@ async def obtener_datos_centro_soar():
     eventos_actualizados = []
     for ev in list(_eventos_soar_recientes):
         ip_ev = ev.get("src_ip")
-        esta_bloqueada = ip_ev in _cuarentena_activa
+        estado_q = ips_cuarentena_vigente.get(ip_ev) if ip_ev else None
+        esta_bloqueada = estado_q is not None
         copia_ev = dict(ev)
         copia_ev["is_blocked"] = esta_bloqueada
-        if esta_bloqueada and ip_ev in _cuarentena_activa:
-            info_q = _cuarentena_activa[ip_ev]
-            es_perm = bool(info_q.get("is_permanent"))
+        if esta_bloqueada and estado_q is not None:
+            es_perm, restantes_ev = estado_q
             copia_ev["is_permanent"] = es_perm
-            copia_ev["remaining_seconds"] = (
-                -1 if es_perm else max(0, int(float(info_q.get("expires_at") or 0) - ahora_epoch))
-            )
+            copia_ev["remaining_seconds"] = restantes_ev
         else:
             copia_ev["is_permanent"] = False
             copia_ev["remaining_seconds"] = 0
@@ -3738,7 +4178,7 @@ async def obtener_datos_centro_soar():
         "enabled": _modulo_soar_activo,
         "auto_block": _autobloqueo_soar_activo,
         "ttl_minutes": 15,
-        "primary_local_ip": sorted(_IPS_PROPIAS_SERVIDOR)[-1] if _IPS_PROPIAS_SERVIDOR else "192.168.18.10",
+        "primary_local_ip": _obtener_ip_local_principal(),
         "lock1_protected": _obtener_resumen_candado1(),
         "quarantine": lista_cuarentena,
         "events": eventos_actualizados,
@@ -3763,7 +4203,7 @@ async def bloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
     modo_dur = solicitud.duration_mode if solicitud.duration_mode in ("permanent", "15m") else "permanent"
     evento = await _ejecutar_pipeline_5_pasos_soar(
         ip_atacante=ip_objetivo,
-        ip_destino="192.168.18.10",
+        ip_destino=_obtener_ip_local_principal(),
         protocolo=solicitud.protocol.upper(),
         confianza=100.0,
         features=None,
@@ -3772,11 +4212,20 @@ async def bloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
         permitir_autobloqueo=True,
         modo_duracion=modo_dur,
     )
+    paso5 = (evento.get("steps") or {}).get("step5_firewall") or {}
+    if not paso5.get("blocked") or not paso5.get("firewall_os_applied"):
+        raise HTTPException(
+            status_code=503,
+            detail=paso5.get("detail")
+            or "No se pudo aplicar la regla de bloqueo en Windows Firewall (requiere privilegios de Administrador).",
+        )
+
     es_perm = (modo_dur == "permanent")
     return {
         "status": "blocked",
         "ip": ip_objetivo,
-        "rule_name": _nombre_regla_firewall_ip(ip_objetivo),
+        "rule_name": paso5.get("rule_name") or _nombre_regla_firewall_ip(ip_objetivo),
+        "firewall_os_applied": True,
         "is_permanent": es_perm,
         "duration_mode": modo_dur,
         "ttl_seconds": None if es_perm else int(TTL_CUARENTENA_SOAR_SEG),
@@ -3794,19 +4243,17 @@ async def desbloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
 
     if ip_objetivo not in _cuarentena_activa:
         ref_norm = referencia.lower().replace(":", "-")
+        es_mac_ref = bool(re.match(r"^([0-9a-f]{2}-){5}[0-9a-f]{2}$", ref_norm))
+        hosts_genericos = {"host externo wan", "equipo-lan-sinnombre", "n/a", "n/a (externo)"}
         for ip_k, datos_q in list(_cuarentena_activa.items()):
-            mac_q = str(datos_q.get("mac") or "").lower().replace(":", "-")
-            host_q = str(datos_q.get("hostname") or "").lower()
-            ident_q = str(datos_q.get("identity") or "").lower()
-            regla_q = str(datos_q.get("rule_name") or "").lower()
-            vendor_q = str(datos_q.get("vendor") or "").lower()
+            mac_q = str(datos_q.get("mac") or "").strip().lower().replace(":", "-")
+            host_q = str(datos_q.get("hostname") or "").strip().lower()
+            regla_q = str(datos_q.get("rule_name") or "").strip().lower()
             if (
                 ref_norm == ip_k.lower()
-                or (mac_q and mac_q != "n/a (wan)" and ref_norm in mac_q)
+                or (es_mac_ref and mac_q == ref_norm)
                 or (regla_q and ref_norm == regla_q)
-                or (host_q and ref_norm in host_q)
-                or (ident_q and ref_norm in ident_q)
-                or (vendor_q and ref_norm in vendor_q)
+                or (host_q and host_q not in hosts_genericos and ref_norm == host_q)
             ):
                 ip_objetivo = ip_k
                 break
@@ -3818,7 +4265,7 @@ async def desbloquear_ip_manual_soar(solicitud: SolicitudAccionIpSoar):
         except ValueError:
             raise HTTPException(
                 status_code=404,
-                detail=f"No se encontró ningún atacante en cuarentena que coincida con la referencia '{referencia}'.",
+                detail=f"No se encontró ningún atacante en cuarentena que coincida exactamente con '{referencia}'.",
             )
     _ultimas_ips_investigadas.pop(ip_objetivo, None)
     nombre_regla = (info_previa or {}).get("rule_name") or _nombre_regla_firewall_ip(ip_objetivo)

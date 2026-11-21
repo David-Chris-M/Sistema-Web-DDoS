@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import Boolean, Column, DateTime, Float, Index, Integer, String
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, Float, Index, Integer, String
 
 from backend.base_datos import Base
 
@@ -21,7 +21,7 @@ class RegistroTrafico(Base):
     dst_ip = Column(String(50), default="127.0.0.1")
     protocol = Column(String(10), default="TCP", index=True)
     duration_ms = Column(Float, default=0.0)
-    total_bytes = Column(Integer, default=0)
+    total_bytes = Column(BigInteger, default=0)
     prediction = Column(String(20), index=True)
     is_attack = Column(Boolean, index=True)
     probability = Column(Float)

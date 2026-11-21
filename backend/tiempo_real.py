@@ -96,10 +96,18 @@ class Telemetria:
 
 # --- Gestor de Conexiones WebSocket ---
 class GestorConexiones:
-    def __init__(self, telemetria: Telemetria, tiempo_espera_envio_s: float = 2.0, max_cola: int = 1000) -> None:
+    def __init__(
+        self,
+        telemetria: Telemetria,
+        tiempo_espera_envio_s: float = 2.0,
+        max_cola: int = 1000,
+        max_conexiones: int = 50,
+    ) -> None:
         self.activas: Set[WebSocket] = set()
+        self._sesiones_ws: dict = {}
         self.cola_mensajes: asyncio.Queue = asyncio.Queue(maxsize=max_cola)
         self.tiempo_espera_envio_s = tiempo_espera_envio_s
+        self.max_conexiones = max_conexiones
         self.telemetria = telemetria
         self._tarea_emision: Optional[asyncio.Task] = None
 
@@ -111,16 +119,63 @@ class GestorConexiones:
     def queue(self):
         return self.cola_mensajes
 
-    async def conectar(self, websocket: WebSocket) -> None:
+    async def conectar(
+        self,
+        websocket: WebSocket,
+        token_hash: Optional[str] = None,
+        expiracion: Optional[float] = None,
+    ) -> bool:
+        if len(self.activas) >= self.max_conexiones:
+            try:
+                await websocket.close(code=1013)
+            except Exception:
+                pass
+            return False
         await websocket.accept()
         self.activas.add(websocket)
+        self._sesiones_ws[websocket] = {
+            "token_hash": token_hash,
+            "expiracion": expiracion,
+        }
+        return True
 
     connect = conectar
 
     def desconectar(self, websocket: WebSocket) -> None:
         self.activas.discard(websocket)
+        self._sesiones_ws.pop(websocket, None)
 
     disconnect = desconectar
+
+    async def _cerrar_ws_seguro(self, websocket: WebSocket, code: int = 1001) -> None:
+        self.desconectar(websocket)
+        try:
+            await asyncio.wait_for(websocket.close(code=code), timeout=1.0)
+        except Exception:
+            pass
+
+    async def cerrar_por_sesion(self, token_hash: str, code: int = 1008) -> int:
+        if not token_hash:
+            return 0
+        objetivos = [
+            ws
+            for ws, meta in list(self._sesiones_ws.items())
+            if meta.get("token_hash") == token_hash
+        ]
+        for ws in objetivos:
+            await self._cerrar_ws_seguro(ws, code=code)
+        return len(objetivos)
+
+    async def cerrar_sesiones_expiradas(self, ahora: Optional[float] = None) -> int:
+        marca = time.time() if ahora is None else float(ahora)
+        expirados = [
+            ws
+            for ws, meta in list(self._sesiones_ws.items())
+            if meta.get("expiracion") is not None and marca > float(meta["expiracion"])
+        ]
+        for ws in expirados:
+            await self._cerrar_ws_seguro(ws, code=1008)
+        return len(expirados)
 
     def publicar(self, mensaje: dict) -> None:
         if not self.activas:
@@ -147,13 +202,14 @@ class GestorConexiones:
     async def _bucle_emision(self) -> None:
         while True:
             mensaje = await self.cola_mensajes.get()
+            await self.cerrar_sesiones_expiradas()
             if not self.activas:
                 continue
             texto_json = json.dumps(mensaje, default=str)
             desconectados = await asyncio.gather(*(self._enviar_individual(ws, texto_json) for ws in list(self.activas)))
             for ws in desconectados:
                 if ws is not None:
-                    self.desconectar(ws)
+                    await self._cerrar_ws_seguro(ws, code=1001)
 
     def iniciar(self) -> None:
         self._tarea_emision = asyncio.create_task(self._bucle_emision(), name="difusor-websocket-telemetria")
@@ -168,6 +224,8 @@ class GestorConexiones:
             except asyncio.CancelledError:
                 pass
             self._tarea_emision = None
+        for ws in list(self.activas):
+            await self._cerrar_ws_seguro(ws, code=1001)
 
     stop = detener
 

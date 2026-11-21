@@ -21,8 +21,11 @@ if not exist "ml\models\scaler.pkl" (
     exit /b 1
 )
 
+set "PYTHON_CMD=python"
+if exist "venv\Scripts\python.exe" set "PYTHON_CMD=venv\Scripts\python.exe"
+
 echo [*] Artefactos Conv1D verificados correctamente.
 echo [*] Iniciando Demonio Supervisor 24/7 (Auto-recuperacion + Rotacion de Logs)...
 
-python demonio_servicio.py %*
+"%PYTHON_CMD%" demonio_servicio.py %*
 pause
